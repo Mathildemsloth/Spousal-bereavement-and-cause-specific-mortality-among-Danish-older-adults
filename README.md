@@ -11,10 +11,10 @@ Losing a spouse is a challenging life event linked to adverse health outcomes, s
 - Analysis of aim I: the average bereavement effect on cause-specific mortality
 - Analysis of aim II: predicting cause-specific mortality
 
-Access the **quarto-pub** link for all the information and the structure of the code in chunks:
-- **Preprocessing:** https://mathildembsloth.quarto.pub/data-preprocessing/
-- **Average bereavement effect:** https://mathildembsloth.quarto.pub/average-bereavement-effect/
-- **Prediction**: https://mathildembsloth.quarto.pub/predicting-cause-specific-mortality-in-older-danish-adults/
+    *Access the quarto-pub link for all the information and the structure of the code in chunks:*
+      - **Preprocessing:** https://mathildembsloth.quarto.pub/data-preprocessing/
+      - **Average bereavement effect:** https://mathildembsloth.quarto.pub/average-bereavement-effect/
+      - **Prediction**: https://mathildembsloth.quarto.pub/predicting-cause-specific-mortality-in-older-danish-adults/
 
 Data availability:
 The data for the analysis is individual level data from Statistics Denmark. The data can only be shared under specific conditions. According to Danish law, scientific organizations can be authorized to work with data within Statistics Denmark and can provide access to individual scientists inside and outside of Denmark. Data are available via the Research Service Department at Statistics Denmark: www.dst.dk/da/TilSalg/Forskningsservice for researchers who meet the criteria for access to confidential data.
