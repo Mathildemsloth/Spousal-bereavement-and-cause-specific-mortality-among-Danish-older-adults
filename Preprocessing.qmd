@@ -1,0 +1,941 @@
+---
+title: "Data preprocessing"
+author: "Mathilde Marie Brünnich Sloth"
+format: html
+editor: visual
+---
+
+# Preprocessing of data
+
+The code provided is the preprocessing of the data used for the analysis (prediction and average bereavement effect). The data has been made available by Statistics Denmark and cannot be accessed without authorization.
+
+## Predicting cause specific death in old age
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+Load Packages
+
+```{r}
+library(DSTora)
+library(ROracle)
+library(tidyverse)
+library(dplyr)
+library(MatchIt)
+library(lubridate)
+library(halfmoon) #visual ways to look at matching
+
+```
+
+Set working directory
+
+```{r}
+ setwd("...")
+```
+
+## Importing data and organizing
+
+Access to the data
+
+```{r}
+#retrieving data from Statistics Denmark
+```
+
+Load the main data frames
+
+-   pop_data: information on the population
+
+-   affluence_index_data: information on the affluence index
+
+-   death_data: information on date of death and cause of death
+
+-   multimorbidity_data: information on comorbidity
+
+```{r}
+pop_data <- tbl(conn, "pop21") |> collect() |> filter(CIVST == "G") |> select(-CIVST)
+affluence_index_data <- tbl(conn, "affluence_index") |> collect()
+death_data <- tbl(conn, "death") |> collect()
+multimorbidity_data <- tbl(conn, "multimorbidity") |> collect()
+```
+
+#### Expenditures data frame
+
+This is data is collected weekly in and estimated in 1000 DKK.
+
+-   TIME: is week number after start 2011
+
+-   COST: is price in 1000s kroner
+
+obs: remember the weeks without information. For these weeks there are no spending. NA's is also no spending in that week.
+
+```{r}
+#Home care
+costs_home_care_data <- tbl(conn, "costs_home_care21") |> collect() 
+
+#Residential care
+costs_residential_data <- tbl(conn, "costs_residential21")|> collect()
+
+#Prescription costs
+costs_lmdb_data <- tbl(conn, "costs_lmdb21")|> collect() 
+
+#Hospital costs (covers both inpatient and outpatient costs)
+costs_hospital_data <- tbl(conn, "costs_drg")|> collect() 
+
+costs_hospital_outpatient_data <-costs_hospital_data |> 
+  filter(SOURCE == "DRGAMB") |> 
+  select(-SOURCE)
+  
+costs_hospital_inpatient_data <-costs_hospital_data |> 
+  filter(SOURCE == "DRGHEL") |> 
+  select(-SOURCE)
+
+#Primary care costs
+costs_sssy_data <- tbl(conn, "costs_sssy20")|> collect() 
+
+```
+
+Looking at the health care expenditures data in each data frame.
+
+```{r}
+summary(costs_home_care_data$COST)
+summary(costs_residential_data$COST)
+summary(costs_lmdb_data$COST)
+summary(costs_hospital_data$COST) #NAs
+summary(costs_hospital_inpatient_data$COST) #NAs
+summary(costs_hospital_outpatient_data$COST)  
+summary(costs_sssy_data$COST) #contains minus values
+```
+
+The sssy dataframe for the primary health care data has negative values. I will only keep values of 0 or higher i.e. the negative values will be changed to 0.
+
+```{r}
+costs_sssy_data <- costs_sssy_data |>
+  mutate(COST = ifelse(COST<0, 0, COST))
+
+summary(costs_sssy_data$COST)
+#no negative values anymore
+```
+
+The hospital data on inpatient expenditures has NA values. I will impute the missing values with 0.
+
+```{r}
+costs_hospital_inpatient_data$COST[is.na(costs_hospital_inpatient_data$COST)] <- 0
+
+sum(is.na(costs_hospital_inpatient_data$COST))
+```
+
+I will rename all the costs variable names for all expenditure data frames into more descriptive names.
+
+```{r}
+costs_hospital_inpatient_data <- costs_hospital_inpatient_data |> 
+  rename(inpatient_costs = COST)
+
+costs_hospital_outpatient_data <- costs_hospital_outpatient_data |> 
+  rename(outpatient_costs = COST)
+
+costs_home_care_data <- costs_home_care_data |> 
+  rename(home_care_costs = COST)
+
+costs_residential_data <- costs_residential_data |> 
+  rename(residential_costs = COST)
+
+costs_lmdb_data <- costs_lmdb_data |> 
+  rename(prescription_costs = COST)
+
+costs_sssy_data <- costs_sssy_data |> 
+  rename(primary_care_costs = COST)
+
+```
+
+I will make a variable with the date of the first day of the week for all weeks from 2011 to 2021.
+
+```{r}
+dates <- seq(as_date('2011/01/01'), as_date('2021/12/31'), by = 'week')
+
+dates
+
+dates <- as.data.frame(dates)
+
+#column with week number
+dates <- dates |> 
+  mutate(TIME = row_number()-1)
+```
+
+Now I will put the new dates variable into all the expenditures data frames.
+
+-   inner_join: only info that matches both df
+
+```{r}
+costs_hospital_inpatient_data <- costs_hospital_inpatient_data |> 
+    inner_join(dates, by = 'TIME')
+
+costs_hospital_outpatient_data <- costs_hospital_outpatient_data |> 
+    inner_join(dates, by = 'TIME')
+
+costs_home_care_data <- costs_home_care_data |> 
+    inner_join(dates, by = 'TIME')
+
+costs_residential_data <- costs_residential_data |> 
+    inner_join(dates, by = 'TIME')
+
+costs_sssy_data <- costs_sssy_data |> 
+    inner_join(dates, by = 'TIME')
+
+costs_lmdb_data <- costs_lmdb_data |> 
+    inner_join(dates, by = 'TIME')
+```
+
+Now I will fill in the weeks without information on expenditures with 0's so that all individuals have expenditures in the data frame for the whole time period for all the different expenditures.
+
+-   :: to use specific package. This is usefull when a function is found in multiple packages and I want to use the specific function within this package (here tidyr).
+
+```{r}
+costs_hospital_inpatient_data <- tidyr::complete(
+  costs_hospital_inpatient_data, person_id,
+  dates = seq(as.Date('2011-01-01'), as.Date('2021-12-31'), by = 'week'),
+  fill = list(inpatient_costs = 0))
+
+costs_hospital_outpatient_data <- tidyr::complete(
+  costs_hospital_outpatient_data, person_id,
+  dates = seq(as.Date('2011-01-01'), as.Date('2021-12-31'), by = 'week'),
+  fill = list(outpatient_costs = 0))
+
+costs_sssy_data <- tidyr::complete(
+  costs_sssy_data, person_id,
+  dates = seq(as.Date('2011-01-01'), as.Date('2021-12-31'), by = 'week'),
+  fill = list(primary_care_costs = 0))
+
+costs_lmdb_data <- tidyr::complete(
+  costs_lmdb_data, person_id,
+  dates = seq(as.Date('2011-01-01'), as.Date('2021-12-31'), by = 'week'),
+  fill = list(prescription_costs = 0))
+
+costs_home_care_data <- tidyr::complete(
+  costs_home_care_data, person_id,
+  dates = seq(as.Date('2011-01-01'), as.Date('2021-12-31'), by = 'week'),
+  fill = list(home_care_costs = 0))
+
+costs_residential_data <- tidyr::complete(
+  costs_residential_data, person_id,
+  dates = seq(as.Date('2011-01-01'), as.Date('2021-12-31'), by = 'week'),
+  fill = list(residential_costs = 0))
+```
+
+Remove the 'TIME' variable for all data frames since it is redundant. We will be using the dates indicating the beginning of the weeks and not the week numbers.
+
+```{r}
+costs_hospital_inpatient_data <- costs_hospital_inpatient_data |> 
+  select(-TIME)
+
+costs_hospital_outpatient_data <- costs_hospital_outpatient_data |> 
+  select(-TIME)
+
+costs_lmdb_data <- costs_lmdb_data |> 
+  select(-TIME)
+
+costs_residential_data <- costs_residential_data |> 
+  select(-TIME)
+
+costs_sssy_data <- costs_sssy_data |> 
+  select(-TIME)
+
+costs_home_care_data <- costs_home_care_data |> 
+  select(-TIME)
+```
+
+We are only going to use the data on expenditures before 2013, as we will investigate bereavement in 2012.
+
+```{r}
+costs_hospital_inpatient_data <- costs_hospital_inpatient_data |> 
+  filter(year(dates) < 2013)
+
+costs_hospital_outpatient_data <- costs_hospital_outpatient_data |> 
+  filter(year(dates) < 2013)
+
+costs_home_care_data <- costs_home_care_data |> 
+  filter(year(dates) < 2013)
+
+costs_residential_data <- costs_residential_data |> 
+  filter(year(dates) < 2013)
+
+costs_sssy_data <- costs_sssy_data |> 
+  filter(year(dates) < 2013)
+
+costs_lmdb_data <- costs_lmdb_data |> 
+  filter(year(dates) < 2013)
+```
+
+##### Data frame for all expenditures
+
+Merge expenditures data frames together
+
+```{r}
+all_expenditures <- costs_hospital_inpatient_data |> 
+  full_join(costs_hospital_outpatient_data, by = c("person_id", "dates")) |> 
+  full_join(costs_home_care_data, by =  c("person_id", "dates")) |>
+  full_join(costs_sssy_data, by =  c("person_id", "dates")) |>
+  full_join(costs_residential_data, by =  c("person_id", "dates")) |>
+  full_join(costs_lmdb_data, by =  c("person_id", "dates"))
+
+head(all_expenditures, 1000) |> 
+  view()
+
+all_expenditures <- all_expenditures |> 
+  replace_na(list(inpatient_costs = 0, outpatient_costs = 0, primary_care_costs = 0, prescription_costs = 0, residential_costs = 0, home_care_costs = 0))
+
+sum(is.na(all_expenditures))
+```
+
+#### Sociodemographic data frame
+
+In this section I will categorize the different variables in the sociodemographic data frame
+
+##### Sex
+
+```{r}
+levels(pop_data$sex)[levels(pop_data$sex) == '1'] <- 'Males'
+levels(pop_data$sex)[levels(pop_data$sex) == '2'] <- 'Females'
+```
+
+##### Number of children
+
+```{r}
+number_of_children_data <- tbl(conn, "number_of_children") |> collect() #alive and resident in DK
+
+number_of_children_data <- number_of_children_data |>
+  replace_na(list(N_MOTHER = 0, N_FATHER = 0)) |>
+  group_by(person_id) |>
+  mutate(children_n = sum(N_MOTHER + N_FATHER)) |>
+  ungroup()
+
+df_sociodemo <- pop_data |> 
+         left_join(number_of_children_data |> select(person_id,children_n), by = "person_id")
+
+
+df_sociodemo <- df_sociodemo |>
+  replace_na(list(children_n = 0))
+```
+
+##### Affluence index
+
+```{r}
+#innerjoin because we domnt want those with NAs on affluence group
+df_sociodemo <- df_sociodemo |> 
+  inner_join(affluence_index_data |> select(person_id,AFFLUENCE_GROUP), by = "person_id")
+
+df_sociodemo <- df_sociodemo |>
+  mutate(affluence.factor = case_when(AFFLUENCE_GROUP %in% seq(0,25,1) ~ 'Lowest',
+                               AFFLUENCE_GROUP %in% seq(26,50,1) ~ 'Second',
+                               AFFLUENCE_GROUP %in% seq(51,75,1) ~ 'Third',
+                               AFFLUENCE_GROUP %in% seq(76,100,1) ~ 'Highest')) |> 
+mutate_at(vars(affluence.factor),as.factor)
+
+
+sum(is.na(df_sociodemo$affluence.factor))
+```
+
+##### Immigration status
+
+```{r}
+df_sociodemo <- df_sociodemo |>
+  mutate(immigration_status = case_when(IE_TYPE == 1 ~ 'Danish',
+                                        IE_TYPE == 2 | IE_TYPE == 3 ~ 'Immigrants or descendants'))
+```
+
+##### Comorbidities
+
+```{r}
+morbidities_n <- multimorbidity_data |>
+  group_by(person_id) |>
+  summarise(comorbidities_n = sum(n())) |>
+  ungroup()
+
+sum(is.na(morbidities_n$comorbidities_n))
+
+df_sociodemo <- df_sociodemo |> 
+  left_join(morbidities_n |> select(person_id, comorbidities_n), by = "person_id")
+
+sum(is.na(df_sociodemo$comorbidities_n))
+
+#people with na on comorbidities do not have disease. Therefore na's are replaces with 0s.
+df_sociodemo <- df_sociodemo |>
+  replace_na(list(comorbidities_n = 0))
+```
+
+##### Join dataframes
+
+```{r}
+df_sociodemo_small <- select(df_sociodemo, c('person_id', 'sex', 'birth_date', 'death_date', 'emigration_date', 'immigration_status', 'affluence.factor','PARTNER_DIED' , 'PARTNERSHIP_ENDED','PARTNERSHIP_END_DATE', 'bereavement_date', 'children_n','comorbidities_n','EXCLUDE', 'EXCLUDE_REASON'))
+```
+
+Categorical variables
+
+```{r}
+#number of children
+#comorbidities
+
+df_sociodemo_small <- df_sociodemo_small |>
+  mutate(children_n.factor = case_when(children_n == 0 ~ "No children",
+                                      children_n == 1 ~ "One child",
+                                      children_n == 2 ~ "Two children",
+                                      children_n == 3 ~ "Three children",
+                                      children_n >= 4 ~ "Four or more")) |>
+  mutate(comorbidities_factor = case_when(comorbidities_n == 0 ~ 0,
+                                        comorbidities_n == 1 ~ 1,
+                                        comorbidities_n == 2 ~ 2,
+                                        comorbidities_n == 3 ~ 3,
+                                        comorbidities_n >= 4 ~ 4))
+
+df_sociodemo_small$children_n.factor <- as.factor(df_sociodemo_small$children_n.factor)
+df_sociodemo_small$comorbidities_factor <- as.factor(df_sociodemo_small$comorbidities_factor)
+
+sum(is.na(df_sociodemo_small$children_n.factor))
+sum(is.na(df_sociodemo_small$comorbidities_factor))
+```
+
+## Matching
+
+1.  Make variable for bereavement in 2012
+2.  Match bereaved with non-bereaved
+3.  Start bereavement/time0 at the same time
+4.  Calculate the average expenditeres (for each type) 1 year prior to time0
+5.  Merge the average df with the sociodemographic df
+
+##### df: Bereaved in 2012
+
+```{r}
+df_sociodemographic_small_bereaved <- df_sociodemo_small |> 
+  filter(year(bereavement_date) == 2012) |>
+  select(person_id, bereavement_date)
+
+df_sociodemographic_small_bereaved$bereaved01 <- 1
+
+
+df <- full_join(df_sociodemo_small, df_sociodemographic_small_bereaved) 
+
+df <- df |>
+  replace_na(list(bereaved01 = 0))
+
+table(df$bereaved01)
+
+```
+
+##### Age at 2011-1-1
+
+```{r}
+date2011 <- c("2011-1-1")
+df$date2011 <- as.Date(date2011, "%Y-%m-%d")
+
+#changing birth_date to not have time
+df$birth_date_ymd <- format(as.POSIXct(df$birth_date,
+                                     format = "%Y-%m-%d %H:%M:%S"),
+                          format = "%Y-%m-%d")
+
+df$birth_date_ymd <- as.Date(df$birth_date_ymd)
+
+#age at start of 2011
+df$age <- time_length(difftime(df$date2011, df$birth_date_ymd), "years")
+
+#categorical age
+df <- df |>
+  mutate(age.factor = case_when(age>=65 & age<70 ~ "65-69",
+                                age>=70 & age<75 ~ "70-74",
+                                age>=75 & age<80 ~ "75-79",
+                                age>=80 & age<85 ~ "80-84",
+                                age>=85 & age<120 ~ "85 plus"))
+
+df$age.factor <- as.factor(df$age.factor)
+
+#exclude those with age under 65 years
+df <- subset(df, !is.na(age.factor))
+```
+
+##### Matching bereaved to non-bereaved
+
+```{r}
+df$affluence.factor <- as.factor(df$affluence.factor)
+
+df <- df |> 
+  filter(year(bereavement_date) > 2011 | is.na(bereavement_date))
+
+#propensity score matching
+matching_ps <- matchit(bereaved01 ~ sex + age.factor + immigration_status + children_n.factor + comorbidities_factor + affluence.factor, data = df, distance = "glm", link = "logit", ratio = 20, replace = FALSE, exact = ~ age.factor + sex)
+```
+
+Looking at the matching
+
+```{r}
+#evaluating matching with PS
+matchingps_df <- match.data(matching_ps)
+
+df <- as.data.frame(df)
+
+matchingps_df <- as.data.frame(matchingps_df)
+
+matchingps_df2 <- bind_matches(df, matching_ps)
+
+differencesps <- tidy_smd(matchingps_df2, c(sex, age.factor, immigration_status, children_n.factor, comorbidities_factor, affluence.factor), .group = bereaved01,.wts = c(matching_ps))
+
+
+#inspect the matching using this plot. 
+match_ps <- love_plot(differencesps)
+```
+
+Excluding individuals dead before index data and looking at the propensity score matc
+
+```{r}
+newdf <- matchingps_df |>
+  group_by(subclass) |>
+  mutate(imputed_date = (bereavement_date[bereaved01==1])) |>
+  ungroup()
+
+#only keep individuals alive at date of match bereaved
+newdf <- newdf |>  
+  replace_na(list(death_date = as_date('2023-01-01')))
+
+sociodemo_df_matched <- subset(newdf, imputed_date < death_date & (imputed_date < emigration_date | is.na(emigration_date)))
+
+subsetted_data <- sociodemo_df_matched |> 
+  arrange(subclass)
+
+#Plot after exclusion
+differencesps_ex <- tidy_smd(subsetted_data, c(sex, age.factor, immigration_status, children_n.factor, comorbidities_factor, affluence.factor), .group = bereaved01)
+
+love_plot(differencesps_ex)
+
+
+#macthing males
+subsetted_data_men <- subset(subsetted_data, sex==1)
+
+differencesps_ex_men <- tidy_smd(subsetted_data_men, c(age.factor, immigration_status, children_n.factor, comorbidities_factor, affluence.factor), .group = bereaved01)
+
+love_plot(differencesps_ex_men)
+
+
+
+#macthing women
+subsetted_data_women <- subset(subsetted_data, sex==2)
+
+differencesps_ex_women <- tidy_smd(subsetted_data_women, c(age.factor, immigration_status, children_n.factor, comorbidities_factor, affluence.factor), .group = bereaved01)
+
+love_plot(differencesps_ex_women)
+
+table(subsetted_data$bereaved01)
+```
+
+Mahalanobis distance matching.
+
+```{r}
+#mahalanobis distance matching
+matching_maha <- matchit(bereaved01 ~ sex + age.factor + immigration_status + children_n.factor + comorbidities_factor + affluence.factor, data = df, method = "nearest", ratio = 20, distance = "mahalanobis", exact = ~ age.factor + sex)
+
+matchingmaha_df <- match.data(matching_maha)
+
+matchingmaha_df <- as.data.frame(matchingmaha_df)
+
+matchingmaha_df2 <- bind_matches(df, matching_maha)
+
+differencesmaha <- tidy_smd(matchingmaha_df2, c(sex, age.factor, immigration_status, children_n.factor, comorbidities_factor, affluence.factor), .group = bereaved01,.wts = c(matching_maha))
+
+#inspect the matching using this plot. The rule of thumb is that the distance should be under 0.10.
+match_maha <- love_plot(differencesmaha)
+
+newdf_maha <- matchingmaha_df |>
+  group_by(subclass) |>
+  mutate(imputed_date = (bereavement_date[bereaved01==1])) |>
+  ungroup()
+
+#only keep individuals alive at date of match bereaved
+newdf_maha <- newdf_maha |>  
+  replace_na(list(death_date = as_date('2023-01-01')))
+
+sociodemo_df_matched_maha <- subset(newdf_maha, imputed_date < death_date & (imputed_date < emigration_date | is.na(emigration_date)))
+
+subsetted_data_maha <- sociodemo_df_matched_maha |> 
+  arrange(subclass)
+
+#Plot after exclusion
+differencesmaha_ex <- tidy_smd(subsetted_data_maha, c(sex, age.factor, immigration_status, children_n.factor, comorbidities_factor, affluence.factor), .group = bereaved01)
+
+love_plot(differencesmaha_ex)
+```
+
+## Average expenditures
+
+Full join the two df: df (sociodemo) and expenditures
+
+```{r}
+long_df <- left_join(subsetted_data, all_expenditures, by =  c("person_id"))
+
+long_df <- long_df |> filter(!is.na(prescription_costs))
+
+#calculate one year prior to bereavement
+long_df$one_year_prior <- long_df$imputed_date - years(1)
+
+#because of leap year (29th of february 2012) there is na's. We replace NA's in the one year prior with 28th of february 2011
+long_df <- long_df |> 
+  replace_na(list(one_year_prior = as_date("2011-02-28")))
+
+#filter the dates one year before bereavement
+long_df <- long_df |>
+  group_by(person_id) |>
+  filter(dates >= one_year_prior & dates < imputed_date) |> 
+  ungroup()
+
+#Averages
+short_df <- long_df |> 
+  group_by(person_id) |> 
+  mutate(average_prescription = sum(prescription_costs)/sum(n())) |> 
+  mutate(average_homecare = sum(home_care_costs)/sum(n())) |> 
+  mutate(average_primarycare = sum(primary_care_costs)/sum(n())) |> 
+  mutate(average_residential = sum(residential_costs)/sum(n())) |> 
+  mutate(average_outpatient = sum(outpatient_costs)/sum(n())) |> 
+  mutate(average_inpatient = sum(inpatient_costs)/sum(n())) |> 
+  filter(row_number()==1) |> 
+  select(-prescription_costs, -home_care_costs, -primary_care_costs, -residential_costs, -outpatient_costs, -inpatient_costs, -dates) |> 
+  ungroup()
+```
+
+## Cause-specific death
+
+Here the causes of death are defined
+
+```{r}
+#load death df and left_join to main df
+short_df <- short_df |> 
+  left_join(death_data |> select(person_id, cause_of_death_ACME), by = "person_id")
+
+
+#impute late death date for missing deaths 
+short_df <- short_df |>
+  replace_na(list(as.Date('2023-01-01')))
+
+#categorisation of cause of death
+short_df <- short_df |> 
+  mutate(cause_of_death = case_when(
+
+    year(death_date) < 2017 &
+    str_starts(cause_of_death_ACME, "C") ~ "cancer",
+    
+    year(death_date) < 2017 &
+    str_starts(cause_of_death_ACME, "E10") | 
+    str_starts(cause_of_death_ACME, "E11") | 
+    str_starts(cause_of_death_ACME, "E12") | 
+    str_starts(cause_of_death_ACME, "E13") |
+    str_starts(cause_of_death_ACME, "E14")   ~ "diabetes",
+    
+    year(death_date) < 2017 &
+    str_starts(cause_of_death_ACME, "F00") |
+    str_starts(cause_of_death_ACME, "F01") |
+    str_starts(cause_of_death_ACME, "F02") |
+    str_starts(cause_of_death_ACME, "F03") |
+    str_starts(cause_of_death_ACME, "G30") |
+    str_starts(cause_of_death_ACME, "G318b") |
+    str_starts(cause_of_death_ACME, "G318e") |
+    str_starts(cause_of_death_ACME, "G319") |
+    str_starts(cause_of_death_ACME, "G310b") |
+    str_starts(cause_of_death_ACME, "G20") |
+    str_starts(cause_of_death_ACME, "G21") |
+    str_starts(cause_of_death_ACME, "G22") ~ "dementia and parkinsons",
+    
+    year(death_date) < 2017 &
+    str_starts(cause_of_death_ACME, "F") |
+    str_starts(cause_of_death_ACME, "X6") |
+    str_starts(cause_of_death_ACME, "X7") |
+    str_starts(cause_of_death_ACME, "X80") |
+    str_starts(cause_of_death_ACME, "X81") |
+    str_starts(cause_of_death_ACME, "X82") |
+    str_starts(cause_of_death_ACME, "X83") |
+    str_starts(cause_of_death_ACME, "X84")    ~ "psychiatric diseases & suicide",
+    
+    year(death_date) < 2017 &
+    str_starts(cause_of_death_ACME, "I") ~ "cardio and vascular diseases", 
+    
+    year(death_date) < 2017 &
+    str_starts(cause_of_death_ACME, "J") ~ "respiratory", 
+    
+    year(death_date) < 2017 &
+    str_starts(cause_of_death_ACME, "K")  ~ "diseases related to the digestive system",
+    
+    year(death_date) > 2016 |
+    is.na(cause_of_death_ACME) ~ "alive",
+    
+    .default = "other"))
+
+
+
+short_df$cause_of_death <- as.factor(short_df$cause_of_death)
+
+short_df |> janitor::tabyl(cause_of_death) |> arrange(-percent)
+
+
+#% of only the dead
+df_dead <- subset(short_df, cause_of_death != "alive")
+df_dead |> janitor::tabyl(cause_of_death) |> arrange(-percent)
+
+```
+
+### Cause-specific death factors
+
+-   0: alive at end of 2016
+
+    -   No death date before 2017
+
+    -   Death after 2016
+
+    -   Emigrated before death/end of followup
+
+-   1: dead of x cause before end of 2016
+
+    -   Death cause is "x"
+
+    -   year of death is before 2017
+
+-   2: dead of another cause before end of 2016
+
+    -   Death before 2017
+
+    -   cause is not x
+
+#### Diseases
+
+##### Chronic respiratory diseases
+
+```{r}
+short_df <- short_df |> 
+  mutate(surv_resp = case_when(
+    year(death_date) > 2016 | 
+    is.na(death_date) | 
+    (year(emigration_date) < 2017 & death_date > emigration_date) ~ 0,
+    
+    cause_of_death == "respiratory" & 
+    year(death_date) < 2017 ~ 1,                                  
+    
+    cause_of_death != "respiratory" & 
+    year(death_date) < 2017 ~ 2,
+    ))
+
+short_df |> 
+  janitor::tabyl(surv_resp) 
+```
+
+##### cancer
+
+```{r}
+short_df <- short_df |> 
+  mutate(surv_cancer = case_when(
+    year(death_date) > 2016 | 
+    is.na(death_date) | 
+    (year(emigration_date) < 2017 & death_date > emigration_date) ~ 0,
+    
+    cause_of_death == "cancer" & 
+    year(death_date) < 2017 ~ 1,                                  
+    
+    cause_of_death != "cancer" & 
+    year(death_date) < 2017 ~ 2,
+    ))
+
+short_df |> 
+  janitor::tabyl(surv_cancer) 
+```
+
+##### Cardiovascular diseases
+
+```{r}
+short_df <- short_df |> 
+  mutate(surv_cardiovascular = case_when(
+    year(death_date) > 2016 | 
+    is.na(death_date) | 
+    (year(emigration_date) < 2017 & death_date > emigration_date) ~ 0,
+    
+    cause_of_death == "cardio and vascular diseases" & 
+    year(death_date) < 2017 ~ 1,                                  
+    
+    cause_of_death != "cardio and vascular diseases" & 
+    year(death_date) < 2017 ~ 2,
+    ))
+
+short_df |> 
+  janitor::tabyl(surv_cardiovascular) 
+```
+
+##### diabetes
+
+```{r}
+short_df <- short_df |> 
+  mutate(surv_dm = case_when(
+    year(death_date) > 2016 | 
+    is.na(death_date) | 
+    (year(emigration_date) < 2017 & death_date > emigration_date) ~ 0,
+    
+    cause_of_death == "diabetes" & 
+    year(death_date) < 2017 ~ 1,                                  
+    
+    cause_of_death != "diabetes" & 
+    year(death_date) < 2017 ~ 2,
+    ))
+
+short_df |> 
+  janitor::tabyl(surv_dm) 
+```
+
+##### diseases related to the digestive system
+
+```{r}
+short_df <- short_df |> 
+  mutate(surv_digestive= case_when(
+    year(death_date) > 2016 | 
+    is.na(death_date) | 
+    (year(emigration_date) < 2017 & death_date > emigration_date) ~ 0,
+    
+    cause_of_death == "diseases related to the digestive system" & 
+    year(death_date) < 2017 ~ 1,                                  
+    
+    cause_of_death != "diseases related to the digestive system" & 
+    year(death_date) < 2017 ~ 2,
+    ))
+
+short_df |> 
+  janitor::tabyl(surv_digestive) 
+```
+
+##### Neurodegenerative diseases (dementia or Parkinsons)
+
+```{r}
+short_df <- short_df |> 
+  mutate(surv_neuro= case_when(
+    year(death_date) > 2016 | 
+    is.na(death_date) | 
+    (year(emigration_date) < 2017 & death_date > emigration_date) ~ 0,
+    
+    cause_of_death == "dementia and parkinsons" & 
+    year(death_date) < 2017 ~ 1,                                  
+    
+    cause_of_death != "dementia and parkinsons" & 
+    year(death_date) < 2017 ~ 2,
+    ))
+
+short_df |> 
+  janitor::tabyl(surv_neuro) 
+```
+
+##### Psychiatric diseases and suicide
+
+```{r}
+short_df <- short_df |> 
+  mutate(surv_psychiatric= case_when(
+    year(death_date) > 2016 | 
+    is.na(death_date) | 
+    (year(emigration_date) < 2017 & death_date > emigration_date) ~ 0,
+    
+    cause_of_death == "psychiatric diseases & suicide" & 
+    year(death_date) < 2017 ~ 1,                                  
+    
+    cause_of_death != "psychiatric diseases & suicide"& 
+    year(death_date) < 2017 ~ 2,
+    ))
+
+short_df |> 
+  janitor::tabyl(surv_psychiatric) 
+```
+
+##### Other causes
+
+```{r}
+short_df <- short_df |> 
+  mutate(surv_other= case_when(
+    year(death_date) > 2016 | 
+    is.na(death_date) | 
+    (year(emigration_date) < 2017 & death_date > emigration_date) ~ 0,
+    
+    cause_of_death == "other" & 
+    year(death_date) < 2017 ~ 1,                                  
+    
+    cause_of_death != "other"& 
+    year(death_date) < 2017 ~ 2,
+    ))
+
+short_df |> 
+  janitor::tabyl(surv_other) 
+```
+
+### Survival time
+
+```{r}
+end_of_followup <- as.Date('2016-12-31')
+
+short_df <- short_df |> 
+  mutate(end_date = case_when(
+    (death_date < emigration_date & year(death_date) < 2017) |
+    (year(death_date) < 2017 & is.na(emigration_date))  ~ death_date,
+    emigration_date < death_date & year(emigration_date) < 2017  ~ emigration_date,
+    year(death_date) > 2016 ~ end_of_followup
+    ))
+
+summary(short_df$end_date)
+
+short_df <- short_df |> 
+  mutate(surv_time = time_length(difftime(end_date, imputed_date), "days"))
+
+summary(short_df$surv_time)
+```
+
+Exclude the "excluded"
+
+```{r}
+df_final <- subset(short_df, EXCLUDE==0)
+```
+
+### Age at bereavement
+
+```         
+  r
+}
+df_final$age_bereavement <- time_length(difftime(df_final$imputed_date, df_final$birth_date_ymd), "years")
+
+# categorical age
+df_final <- df_final |>
+  mutate(
+    age_bereavement.factor =
+      case_when(
+        age_bereavement >= 65 & age_bereavement < 70 ~ "65-69",
+        age_bereavement >= 70 & age_bereavement < 75 ~ "70-74",
+        age_bereavement >= 75 & age_bereavement < 80 ~ "75-79",
+        age_bereavement >= 80 & age_bereavement < 85 ~ "80-84",
+        age_bereavement >= 85 & age_bereavement < 110 ~ "85 plus"
+      )
+  )
+
+df_final$age_bereavement.factor <- as.factor(df_final$age_bereavement.factor)
+
+sum(is.na(df_final$age_bereavement.factor))
+```
+
+#### Averages in total and overall survival
+
+```{r}
+df_final <- df_final |> 
+  mutate(average_full = average_inpatient + average_outpatient + average_homecare + average_prescription + average_primarycare + average_residential) |> 
+  mutate(surv_overall = if_else(surv_cancer == 1 | surv_cancer == 2, 1, 0))
+
+df_final |> janitor::tabyl(surv_overall)
+```
+
+Relevel sex and bereaved
+
+```{r}
+df_final$sex <- df_final$sex
+levels(df_final$sex)[levels(df_final$sex) == 1] <- "Males"
+levels(df_final$sex)[levels(df_final$sex) == 2] <- "Females"
+
+levels(df_final$bereaved01)[levels(df_final$bereaved01) == 0] <- "Non-bereaved"
+levels(df_final$bereaved01)[levels(df_final$bereaved01) == 0] <- "Bereaved"
+
+```
+
+### CSV
+
+```{r}
+write.csv(df_final, ".../Data/dataframe1.csv")
+```

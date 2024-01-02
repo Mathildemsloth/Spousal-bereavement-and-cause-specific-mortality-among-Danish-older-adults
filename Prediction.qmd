@@ -1,0 +1,2215 @@
+---
+title: "Predicting cause-specific mortality in older Danish adults"
+author: "Mathilde Marie Brünnich Sloth"
+format: html
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+Load libraries
+
+```{r}
+library(riskRegression)
+library(dplyr)
+library(survival)
+library(Publish)
+library(rms)
+library(rsample)
+library(lubridate)
+library(tidymodels)
+library(xlsx)
+library(finetune) #tuning hyperparameters
+library(DALEX) #explainability
+library(DALEXtra) #explainability
+library(ingredients) #explainability
+library(ggsci) #colours for plots
+library(patchwork) #arrangeing plots together
+library(extrafont) #fonts for ggplot
+```
+
+Load data
+
+```{r}
+df <- read.csv(".../Data/dataframe1.csv")
+
+setwd("...")
+```
+
+Format
+
+```{r}
+df$children_n.factor <- as.factor(df$children_n.factor)
+df$comorbidities_factor <- as.factor(df$comorbidities_factor)
+df$immigration_status <- as.factor(df$immigration_status)
+df$bereaved01 <- as.factor(df$bereaved01)
+
+df$surv_cancer <- as.factor(df$surv_cancer)
+df$surv_cardiovascular <- as.factor(df$surv_cardiovascular)
+df$surv_neuro <- as.factor(df$surv_neuro)
+df$surv_dm <- as.factor(df$surv_dm)
+df$surv_digestive <- as.factor(df$surv_digestive)
+df$surv_psychiatric <- as.factor(df$surv_psychiatric)
+df$surv_resp <- as.factor(df$surv_resp)
+
+df <- df |> 
+  mutate_if(is.character,as.factor)
+
+df <- df |> 
+  select(-EXCLUDE, -EXCLUDE_REASON)
+```
+
+## Binary outcome
+
+Death due to specific causes is remade into a binary framework with 0 being alive or dying from another cause and 1 being dying from the cause in focus.
+
+```{r}
+df <- df |> 
+  mutate(surv_cancer01 = if_else(surv_cancer==0 | surv_cancer==2, 0, 1)) |> 
+  mutate(surv_CVD01 = if_else(surv_cardiovascular==0 | surv_cardiovascular==2, 0, 1)) |> 
+  mutate(surv_neuro01 = if_else(surv_neuro==0 | surv_neuro==2, 0, 1)) |> 
+  mutate(surv_dm01 = if_else(surv_dm==0 | surv_dm==2, 0, 1)) |> 
+  mutate(surv_digestive01 = if_else(surv_digestive==0 | surv_digestive==2, 0, 1)) |> 
+  mutate(surv_psychiatric01 = if_else(surv_psychiatric==0 | surv_psychiatric==2, 0, 1)) |> 
+  mutate(surv_respiratory01 = if_else(surv_resp==0 | surv_resp==2, 0, 1))
+```
+
+## Survival (1 year and 3 years)
+
+Computing a binary variable for 1 and 3-year survival for each cause of death.
+
+```{r}
+df <- df |> 
+  mutate(surv_cancer3 = if_else(surv_cancer == 1 & surv_time <= 1095.75, 1,0),
+         surv_CVD3 =  if_else(surv_cardiovascular == 1 & surv_time <= 1095.75, 1,0),
+         surv_neuro3 =  if_else(surv_neuro == 1 & surv_time <= 1095.75, 1,0),
+         surv_dm3 =  if_else(surv_dm == 1 & surv_time <= 1095.75, 1,0),
+         surv_digestive3 =  if_else(surv_digestive == 1 & surv_time <= 1095.75, 1,0),
+         surv_psychiatric3 =  if_else(surv_psychiatric == 1 & surv_time <= 1095.75, 1,0),
+         surv_psychiatric2 =  if_else(surv_psychiatric == 1 & surv_time <= 730.5, 1,0),
+         surv_psychiatric1 =  if_else(surv_psychiatric == 1 & surv_time <= 365.25, 1,0),
+         surv_respiratory3 =  if_else(surv_resp == 1 & surv_time <= 1095.75, 1,0),
+         surv_overall3 =  if_else(surv_overall == 1 & surv_time <= 1095.75, 1,0)) |> 
+  mutate(surv_cancer3 = as.factor(surv_cancer3),
+         surv_CVD3 = as.factor(surv_CVD3),
+         surv_neuro3 = as.factor(surv_neuro3),
+         surv_dm3 = as.factor(surv_dm3),
+         surv_digestive3 = as.factor(surv_digestive3),
+         surv_psychiatric3 = as.factor(surv_psychiatric3),
+         surv_psychiatric2 = as.factor(surv_psychiatric2),
+         surv_psychiatric1 = as.factor(surv_psychiatric1),
+         surv_respiratory3 = as.factor(surv_respiratory3) )
+
+
+df |> janitor::tabyl(surv_cancer3)
+```
+
+## Levels
+
+Naming the categories of the survival variable.
+
+```{r}
+levels(df$surv_overall)[levels(df$surv_overall)== 0] <- 'Alive'
+levels(df$surv_overall)[levels(df$surv_overall)== 1] <- 'Dead'
+```
+
+## Prediction
+
+First step of the prediction modelling is a data split into train/test.
+
+```{r}
+set.seed(29)
+
+df_split <- initial_split(df)
+
+df_train <- training(df_split)
+
+df_test <- testing(df_split)
+```
+
+Descriptive statistics
+
+```{r}
+
+df_train$TRAIN <- "TRUE"
+df_test$TEST <- "TRUE"
+
+df_look <- df_train |>
+  full_join(df_test) |> 
+  mutate(TRAIN_TEST = case_when(TRAIN == "TRUE" ~ "TRAIN", 
+                                TEST == "TRUE" ~ "TEST"))
+
+#look at the distribution of the outcome with the utable function
+death_cause_tabel <- utable(TRAIN_TEST ~ surv_cancer3 + surv_CVD3 + surv_neuro3 + surv_dm3 + surv_digestive3 + surv_psychiatric3 + surv_respiratory3 + surv_overall3, data = df_look) 
+
+#Cause of death table
+death_cause_tabel <- summary(death_cause_tabel)
+write.xlsx(death_cause_tabel, ".../Results/Table_cause_of_death.xls")
+
+#same for males and females sep
+death_cause_tabel_sex <- utable(sex ~ surv_cancer3 + surv_CVD3 + surv_neuro3 + surv_dm3 + surv_digestive3 + surv_psychiatric3 + surv_respiratory3 , data = df_look) 
+death_cause_tabel_sex_table <- summary(death_cause_tabel_sex)
+write.xlsx(death_cause_tabel_sex_table, ".../Results/Table_cause_of_death_sex.xls")
+
+#table 1
+table_1 <- summary(utable(TRAIN_TEST ~ bereaved01 + sex + age_bereavement.factor + immigration_status + comorbidities_factor + children_n.factor + affluence.factor + average_full + average_prescription + average_homecare + average_residential + average_primarycare + average_outpatient + average_inpatient, 
+               data = df_look, show.totals = T, summary.format = "median(x) [iqr(x)]"))
+
+write.xlsx(table_1, ".../Results/Table1.xls")
+
+
+subset_test <- subset(df_look, TRAIN_TEST= "TEST" )
+subset_train <- subset(df_look, TRAIN_TEST= "TRAIN" )
+
+#prescription
+quantile(df_look$average_prescription, prob=c(.05,.95))
+quantile(subset_train$average_prescription, prob=c(.05,.95))
+quantile(subset_test$average_prescription, prob=c(.05,.95)) 
+
+#homecare
+quantile(df_look$average_homecare, prob=c(.05,.95))
+quantile(subset_train$average_homecare, prob=c(.05,.95))
+quantile(subset_test$average_homecare, prob=c(.05,.95)) 
+
+#residential care
+quantile(df_look$average_residential, prob=c(.05,.95))
+quantile(subset_train$average_residential, prob=c(.05,.95))
+quantile(subset_test$average_residential, prob=c(.05,.95)) 
+
+#primary care
+quantile(df_look$average_primarycare, prob=c(.05,.95))
+quantile(subset_train$average_primarycare, prob=c(.05,.95))
+quantile(subset_test$average_primarycare, prob=c(.05,.95)) 
+
+#outpatient
+quantile(df_look$average_outpatient, prob=c(.05,.95))
+quantile(subset_train$average_outpatient, prob=c(.05,.95))
+quantile(subset_test$average_outpatient, prob=c(.05,.95)) 
+
+#inpatient
+quantile(df_look$average_inpatient, prob=c(.05,.95))
+quantile(subset_train$average_inpatient, prob=c(.05,.95))
+quantile(subset_test$average_inpatient, prob=c(.05,.95)) 
+
+#medians with more decimal points
+median(df_look$average_prescription)
+median(subset_train$average_prescription)
+median(subset_test$average_prescription)
+# 0.04
+
+median(df_look$average_homecare)
+#0
+
+median(df_look$average_residential)
+#0
+
+median(df_look$average_primarycare)
+#0.019
+
+median(df_look$average_outpatient)
+#0.036
+
+median(df_look$average_inpatient)
+#0
+
+```
+
+### Logistic regression
+
+First model for the prediction modelling is logistic regression models. Three prediction models for each cause of death will be performed:
+
+-   LRM null: a logistic regression model (LRM) without any predictors
+
+-   LRM simple: a LRM with the predictors age, sex and bereavement
+
+-   LRM full: a LRM with all predictors: age, sex, bereavement, affluence, immigration status, number of children, number of comorbidities, and expenditures with restricted cubic splines with 3 knots.
+
+Investigating the predicted risks for 3 year mortality of cause-specific death.
+
+Specify data distance
+
+```{r}
+dd <- datadist(df_train)
+
+options(datadist = "dd")
+```
+
+##### All cause mortality
+
+```{r}
+fit_overall_null <- glm(surv_overall3 ~ 1, data = df_train, x = T, y = T, family = "binomial")
+
+fit_overall <- lrm(surv_overall3 ~ bereaved01 + affluence.factor + sex + age_bereavement.factor * rcs(average_full,3) + children_n.factor + comorbidities_factor + immigration_status, data = df_train, x = T, y = T)
+
+fit1_score <- Score(object = list("LRM Full Model, overall" = fit_overall, 
+                                  "Null Model" = fit_overall_null), 
+                    data = df_test,
+                    formula = surv_overall3 ~ 1,
+                    metrics = c("auc","brier"), summary = "ipa", plots = "cal",
+                    se.fit = T,  null.model = T) 
+                    
+plotCalibration(fit1_score,legend = F)
+```
+
+##### Cancer
+
+```{r}
+#Null model
+fit0_cancer <- glm(surv_cancer3 ~ 1, data = df_train, family = "binomial",x = T, y = T)
+
+#simple model with age and sex
+fit_cancer_simple <- lrm(surv_cancer3 ~ bereaved01 + sex + age_bereavement.factor, data = df_train, x = T, y = T)
+
+#model with expenditures as arv.
+fit_cancer_arv <- lrm(surv_cancer3 ~ bereaved01 + affluence.factor + sex + age_bereavement.factor + children_n.factor + comorbidities_factor + immigration_status + rcs(average_inpatient, 3) +rcs(average_outpatient, 3) +  rcs(average_prescription, 3) + rcs(average_primarycare, 3) + rcs(average_residential,3) + rcs(average_homecare,3), 
+            data = df_train, x = T, y = T)
+```
+
+Evaluating the scores
+
+```{r}
+df_test <- data.table::as.data.table(df_test)
+
+fit_cancer_total_score <- Score(object = 
+                          list("LRM Simple Model" = fit_cancer_simple,
+                                "LRM Full Model, each arv exp" = fit_cancer_arv,
+                                "LRM Null" = fit0_cancer),
+                    data = df_test,
+                    formula = surv_cancer3 ~ 1,
+                    metrics = c("auc","brier"),summary = "ipa",plots = "cal",
+                    se.fit = T,  null.model = T) 
+  
+summary(fit_cancer_total_score)
+
+plotCalibration(fit_cancer_total_score, models = "LRM Full Model, each arv exp")
+```
+
+Nomogram
+
+```{r}
+uu <- datadist(df)
+options(datadist="uu")
+plot(nomogram(fit_cancer_arv, fun = plogis, funlabel = paste0("Risk of cancer")))
+```
+
+##### Cardio and vascular diseases
+
+```{r}
+#Null model
+fit0_cv <- glm(surv_CVD3 ~ 1, data = df_train, family = "binomial", x = T, y = T)
+
+#simple model with age and sex
+fit_cv_simple <- lrm(surv_CVD3 ~ bereaved01 + sex + age_bereavement.factor, data = df_train, x = T, y = T)
+
+#model with expenditures as arv.
+fit_cv_arv <- lrm(surv_CVD3 ~ bereaved01 + affluence.factor + sex + age_bereavement.factor + children_n.factor + comorbidities_factor + immigration_status + rcs(average_inpatient, 3) +rcs(average_outpatient, 3) +  rcs(average_prescription, 3) + rcs(average_primarycare, 3) + rcs(average_residential,3) + rcs(average_homecare,3), 
+            data = df_train, x = T, y = T)
+```
+
+Evaluating the scores
+
+```{r}
+fit_cv_total_score <- Score(object = 
+                            list("LRM Simple Model" = fit_cv_simple,
+                                 "LRM Full Model, each arv exp" = fit_cv_arv,
+                                 "LRM Null" = fit0_cv),
+                    data = df_test,
+                    formula = surv_CVD3 ~ 1,
+                    metrics = c("auc","brier"), summary = "ipa", plots = "cal",
+                    se.fit = T, null.model = T)
+
+summary(fit_cv_total_score)
+
+plotCalibration(fit_cv_total_score, models = "LRM Full Model, each arv exp")
+plotCalibration(fit_cv_total_score, models = "LRM Simple Model")
+```
+
+Nomogram
+
+```{r}
+uu <- datadist(df)
+options(datadist="uu")
+plot(nomogram(fit_cv_arv, fun = plogis, funlabel = paste0("Risk of CVD")))
+```
+
+##### Dementia and Parkinson disease
+
+```{r}
+#Null model
+fit0_neuro <- glm(surv_neuro3 ~ 1, data = df_train, family = "binomial", x = T, y = T)
+
+#simple model with age and sex
+fit_neuro_simple <- lrm(surv_neuro3 ~ bereaved01 + sex + age_bereavement.factor, data = df_train, x = T, y = T)
+
+#model with expenditures as arv.
+fit_neuro_arv <- lrm(surv_neuro3 ~ bereaved01 + affluence.factor + sex + age_bereavement.factor + children_n.factor + comorbidities_factor + immigration_status + rcs(average_inpatient, 3) +rcs(average_outpatient, 3) +  rcs(average_prescription, 3) + rcs(average_primarycare, 3) + rcs(average_residential,3) + rcs(average_homecare,3), 
+            data = df_train, x = T, y = T)
+```
+
+Evaluate the scores
+
+```{r}
+fit_neuro_total_score <- Score(object = 
+                        list("LRM Simple Model" = fit_neuro_simple,
+                             "LRM Full Model, each arv exp" = fit_neuro_arv,
+                             "LRM Null" = fit0_neuro),
+                    data = df_test,
+                    formula = surv_neuro3 ~ 1,
+                    metrics = c("auc","brier"), summary = "ipa",plots = "cal",
+                    se.fit = T, 
+                     null.model = T)
+
+summary(fit_neuro_total_score)
+
+plotCalibration(fit_neuro_total_score)
+```
+
+Nomogram
+
+```{r}
+uu <- datadist(df)
+options(datadist="uu")
+plot(nomogram(fit_neuro_simple, fun = plogis, funlabel = paste0("Risk of dementia or parkinsons")))
+plot(nomogram(fit_neuro_arv, fun = plogis, funlabel = paste0("Risk of dementia or parkinsons")))
+```
+
+##### Diabetes
+
+```{r}
+#Null model
+fit0_dm <- glm(surv_dm3 ~ 1, data = df_train, family = "binomial")
+
+#simple model with age and sex
+fit_dm_simple <- lrm(surv_dm3 ~ bereaved01 + sex + age_bereavement.factor, data = df_train, x = T, y = T)
+
+#model with expenditures as arv.
+fit_dm_arv <- lrm(surv_dm3 ~ bereaved01 + affluence.factor + sex + age_bereavement.factor + children_n.factor + comorbidities_factor + immigration_status + rcs(average_inpatient, 3) +rcs(average_outpatient, 3) +  rcs(average_prescription, 3) + rcs(average_primarycare, 3) + rcs(average_residential,3) + rcs(average_homecare,3), 
+            data = df_train, x = T, y = T)
+```
+
+Evaluate score
+
+```{r}
+fit_dm_total_score <- Score(object = 
+                            list("LRM Simple Model" = fit_dm_simple,
+                                 "LRM Full Model, each arv exp" = fit_dm_arv,
+                                 "LRM Null" = fit0_dm), 
+                    data = df_test,
+                    formula = surv_dm3 ~ 1,
+                    metrics = c("auc","brier"),summary = "ipa",plots = "cal",
+                    se.fit = T,
+                    null.model = T)
+
+summary(fit_dm_total_score)
+
+plotCalibration(fit_dm_total_score, models = "LRM Full Model, each arv exp",round = F)
+
+plot(nomogram(fit_dm_arv, fun = plogis, funlabel = paste0("Risk of Diabetes")))
+```
+
+##### Diseases related to the digestive system
+
+```{r}
+#Null model
+fit0_digestive <- glm(surv_digestive3 ~ 1, data = df_train, family = "binomial", x = T, y = T)
+
+#simple model with age and sex
+fit_digestive_simple <- lrm(surv_digestive3 ~ bereaved01 + sex + age_bereavement.factor, data = df_train, x = T, y = T)
+
+#model with expenditures as arv.
+fit_digestive_arv <- lrm(surv_digestive3 ~ bereaved01 + affluence.factor + sex + age_bereavement.factor + children_n.factor + comorbidities_factor + immigration_status + rcs(average_inpatient, 3) +rcs(average_outpatient, 3) +  rcs(average_prescription, 3) + rcs(average_primarycare, 3) + rcs(average_residential,3) + rcs(average_homecare,3), 
+            data = df_train, x = T, y = T)
+```
+
+Evaluate score
+
+```{r}
+fit_digestive_total_score <- Score(object = 
+                            list("LRM Simple Model" = fit_digestive_simple,
+                                 "LRM Full Model, each arv exp" = fit_digestive_arv,
+                                 "LRM Null" = fit0_digestive),
+                    data = df_test,
+                    formula = surv_digestive3 ~ 1,
+                    metrics = c("auc","brier"),summary = "ipa",plots = "cal",
+                    se.fit = T,
+                    null.model = T)
+
+summary(fit_digestive_total_score)
+
+plotCalibration(fit_digestive_total_score, models = "LRM Full Model, each arv exp", round = F)
+
+plot(nomogram(fit_digestive_arv, fun = plogis, funlabel = paste0("Risk of digestive diseases")))
+```
+
+##### Psychiatric diseases and suicide
+
+```{r}
+#Null model
+fit0_psychiatric <- glm(surv_psychiatric3 ~ 1, data = df_train, family = "binomial", x = T, y = T)
+
+#simple model with age and sex
+fit_psychiatric_simple <- lrm(surv_psychiatric3 ~ bereaved01 + sex + age_bereavement.factor, data = df_train, x = T, y = T)
+
+#model with expenditures as arv.
+fit_psychiatric_arv <- lrm(surv_psychiatric3 ~ bereaved01 + affluence.factor + sex + age_bereavement.factor + children_n.factor + comorbidities_factor + immigration_status + rcs(average_inpatient, 3) +rcs(average_outpatient, 3) +  rcs(average_prescription, 3) + rcs(average_primarycare, 3) + rcs(average_residential,3) + rcs(average_homecare,3), 
+            data = df_train, x = T, y = T)
+```
+
+Evaluate score
+
+```{r}
+fit_psychiatric_total_score <- Score(object = 
+                            list("LRM Simple Model" = fit_psychiatric_simple,
+                                 "LRM Full Model, each arv exp" = fit_psychiatric_arv,
+                                 "LRM Null" = fit0_psychiatric),
+                    data = df_test,
+                    formula = surv_psychiatric3 ~ 1,
+                    metrics = c("auc","brier"), summary = "ipa", plots = "cal",
+                    se.fit = T,  null.model = T)
+
+summary(fit_psychiatric_total_score)
+
+plotCalibration(fit_psychiatric_total_score, models = "LRM Full Model, each arv exp", round = F)
+
+plot(nomogram(fit_psychiatric_arv, fun = plogis, funlabel = paste0("Risk of psychiatric diseases")))
+```
+
+1 year psych (not included in thesis)
+
+```{r}
+#Null model
+fit0_psychiatric1 <- glm(surv_psychiatric1 ~ 1, data = df_train, family = "binomial", x = T, y = T)
+
+#simple model with age and sex
+fit_psychiatric_simple1 <- lrm(surv_psychiatric1 ~ bereaved01 + sex + age_bereavement.factor, data = df_train, x = T, y = T)
+
+#model with expenditures as arv.
+fit_psychiatric_arv1 <- lrm(surv_psychiatric1 ~ bereaved01 + affluence.factor + sex + age_bereavement.factor + children_n.factor + comorbidities_factor + immigration_status + rcs(average_inpatient, 3) +rcs(average_outpatient, 3) +  rcs(average_prescription, 3) + rcs(average_primarycare, 3) + rcs(average_residential,3) + rcs(average_homecare,3), 
+            data = df_train, x = T, y = T)
+
+fit_psychiatric_total_score1 <- Score(object = 
+                            list("LRM Simple Model 1y" = fit_psychiatric_simple1,
+                                 "LRM Full Model, each arv exp 1y" = fit_psychiatric_arv1,
+                                 "LRM Null 1y" = fit0_psychiatric1),
+                    data = df_test,
+                    formula = surv_psychiatric1 ~ 1,
+                    metrics = c("auc","brier"), summary = "ipa", plots = "cal",
+                    se.fit = T,  null.model = T)
+```
+
+##### Respiratory diseases
+
+```{r}
+#Null model
+fit0_resp <- glm(surv_respiratory3 ~ 1, data = df_train, family = "binomial", x = T, y = T)
+
+#simple model with age and sex
+fit_resp_simple <- lrm(surv_respiratory3 ~ bereaved01 + sex + age_bereavement.factor, data = df_train, x = T, y = T)
+
+#model with expenditures as arv.
+fit_resp_arv <- lrm(surv_respiratory3 ~ bereaved01 + affluence.factor + sex + age_bereavement.factor + children_n.factor + comorbidities_factor + immigration_status + rcs(average_inpatient, 3) +rcs(average_outpatient, 3) +  rcs(average_prescription, 3) + rcs(average_primarycare, 3) + rcs(average_residential,3) + rcs(average_homecare,3), 
+            data = df_train, x = T, y = T)
+```
+
+Evaluate score
+
+```{r}
+fit_resp_total_score <- Score(object = 
+                         list("LRM Simple Model" = fit_resp_simple,
+                              "LRM Full Model, each arv exp" = fit_resp_arv,
+                              "LRM Null" = fit0_resp),
+                    data = df_test,
+                    formula = surv_respiratory3 ~ 1,
+                    metrics = c("auc","brier"),summary = "ipa", plots = "cal",
+                    se.fit = T, 
+                    null.model = T)
+
+summary(fit_resp_total_score)
+
+plotCalibration(fit_resp_total_score, models = "LRM Full Model, each arv exp")
+
+plot(nomogram(fit_resp_arv, fun = plogis, funlabel = paste0("Risk of respiratory diseases")))
+```
+
+##### 
+
+### XGBoost
+
+Next model is Extreme Gradient Boosting (XGBoost) with all predictors for predicting the 3-year mortality.
+
+Cross-validations split for tuning hyper-parameters
+
+```{r}
+set.seed(29)
+
+df_train_cv <- vfold_cv(data = df_train, v = 5)
+```
+
+#### Cancer
+
+For this analysis the outcome must be a factor. Catagorical predictors should have dummy variables.
+
+-   1: get the disease (cancer) before end of follow-up
+-   0: does not get the disease (dies of something else or survives until follow-up)
+
+```{r}
+#writing recipe for the formula and making the dummy variables
+xg_cancer_recipe <- recipe(surv_cancer3 ~ bereaved01 + affluence.factor +                                            sex + age_bereavement.factor + 
+                           children_n.factor + comorbidities_factor +
+                           immigration_status + average_inpatient +
+                           average_outpatient + average_prescription +
+                           average_primarycare + average_residential +
+                           average_homecare, data = df_train) |> 
+  step_dummy(all_nominal_predictors(),one_hot = T)
+
+#xg boost with computation engine: xgboost
+xgb_cancer_spec <- boost_tree(trees = tune(),
+                              mtry = tune(),
+                              min_n = tune(),
+                              tree_depth = tune(),
+                              stop_iter = tune(),
+                              learn_rate = tune()
+                              ) |> 
+                              set_engine("xgboost", validation = 0.2) |> 
+                              set_mode("classification")
+
+#workflow
+xgb_cancer_wf <- workflow(xg_cancer_recipe, xgb_cancer_spec)
+
+
+#tune hyperparameters (defines how our model is structured). Use the train df with crossvalidation.
+
+set.seed(29)
+
+doParallel::registerDoParallel()
+
+xgb_cancer_rs <- tune_race_anova(xgb_cancer_wf,
+                          df_train_cv,
+                          grid = 30,
+                          metrics = metric_set(brier_class),
+                          control = control_race(verbose_elim = TRUE))
+
+#plot results
+plot_race(xgb_cancer_rs)
+
+#Grid of hyperparameters
+show_best(xgb_cancer_rs)
+
+
+#finalize workflow
+xgb_cancer_last <- xgb_cancer_wf |> 
+    finalize_workflow(select_best(xgb_cancer_rs, 'brier_class')) |> 
+    last_fit(df_split)
+
+#metrics
+xgb_cancer_last |> collect_metrics()
+
+#predictions
+xgb_cancer_last |> collect_predictions()
+
+
+#group
+xgb_cancer_full_preds <- xgb_cancer_last$.predictions
+
+xgb_cancer_full_preds <- xgb_cancer_full_preds[[1]][2]
+
+xgb_cancer_full_preds <- as.matrix(xgb_cancer_full_preds)
+
+
+
+
+#Specify datadist
+dd <- datadist(df_train)
+
+options(datadist = "dd")
+
+# evaluate performance
+fit_cancer_total_score <- Score(list('LRM NULL' = fit0_cancer,
+                              'LRM Simple' = fit_cancer_simple,
+                              'LRM Full' = fit_cancer_arv,
+                              'Xgboost Full' = xgb_cancer_full_preds), 
+                               formula = surv_cancer3 ~ 1,
+                               data = df_test,
+                               summary = 'ipa', plots = 'calibration',
+                               metrics = c('AUC', 'brier'), 
+                               se.fit = T)
+summary(fit_cancer_total_score)
+
+plotCalibration(fit_cancer_total_score, models =  "Xgboost Full", legend = T, auc.in.legend = F, brier.in.legend = F, col = c("#88CCEE", "#117733"), rug = F, xlab = "Predicted risk of death from cancer", ylab = "Observed frequency of death from cancer")
+
+
+
+```
+
+##### Prediction plots
+
+```{r}
+#put the predictions from the xgb into the df. 
+df_test$Predictions_Cancer <-  xgb_cancer_full_preds
+
+#personal colour scheme
+m_color <- c("#56B4E9", "#CC79A7", "#0072B2", "#E69F00", "#009E73")
+
+
+#sex differenes and age
+sex_age_cancer <- df_test |>
+  ggplot(aes(x = age_bereavement, y = Predictions_Cancer, fill=bereaved01, colour = bereaved01)) +
+  geom_smooth(show.legend = F) +
+  facet_wrap(vars(sex))+
+  theme_minimal(base_size = 14) +
+  scale_color_manual(values = m_color)+ 
+  scale_fill_manual(values = m_color)+  
+  xlab("Age at bereavement") +
+  ylab("Predicted risk of dying from cancer") +
+  scale_x_continuous(limits = c(65, 100)) 
+
+#save
+pdf(".../Results/Cancer/Sex differences/sex_age_cancer.pdf", width = 7, height = 7)
+print(sex_age_cancer)
+dev.off()
+
+#geoim_smooth(..., method = loess)
+
+#Differences in predicted risks for bereaved and non-bereaved.
+boxplot_cancer <- df_test |>
+          ggplot(aes(x = bereaved01, y = Predictions_Cancer)) +
+          geom_boxplot(outlier.shape = NA, color = "navy", fill = "#56B4E9", alpha=0.6) + 
+          theme_minimal(base_size = 14) +
+          facet_wrap(vars(sex))+
+          scale_y_continuous(limits = c(0, 0.15)) + 
+          xlab("Bereavement status") +
+          ylab("Predicted risk of dying from cancer")
+
+
+pdf(".../Results/Cancer/boxplot_cancer.pdf", width = 7, height = 7)
+print(boxplot_cancer)
+dev.off()
+
+#distribution of risks
+cancer_risk_distribution <- df_test |> 
+              ggplot(aes(x = Predictions_Cancer,fill = surv_cancer3)) + 
+              geom_density(alpha = 0.4, show.legend = F) +
+              xlab("Predicted risk of dying from cancer") +
+              theme_minimal(base_size = 14) +
+              scale_color_manual(values = m_color)+ 
+              scale_fill_manual(values = m_color)
+
+#save
+pdf(".../Results/Cancer/Sex differences/cancer_risk_distribution.pdf", width = 7, height = 7)
+print(cancer_risk_distribution)
+dev.off()
+
+
+############ CURE RELATED EXP #################
+#blue: non-bereaved
+
+#expenditures, sex diffrences
+cancer_inpatient <- df_test |>
+                ggplot(aes(x = average_inpatient, y = Predictions_Cancer, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend =F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+   theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital inpatient expenditure") +
+                        ylab("Predicted risk of dying from cancer") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+
+#test
+cancer_inpatient <- df_test |>
+                ggplot(aes(x = average_inpatient, y = Predictions_Cancer, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        Hmisc::histSpikeg(Predictions_Cancer ~ average_inpatient,lowess = T,data = df_test)+
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+   theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital inpatient expenditure") +
+                        ylab("Predicted risk of dying from cancer") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+
+
+cancer_outpatient <- df_test |>
+                ggplot(aes(x = average_outpatient, y = Predictions_Cancer, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+  theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital outpatient expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+cancer_primarycare <- df_test |>
+                ggplot(aes(x = average_primarycare, y = Predictions_Cancer, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+  theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly primary care expenditure") +
+                        ylab("Predicted risk of dying from cancer") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+cancer_prescription <- df_test |>
+                ggplot(aes(x = average_prescription, y = Predictions_Cancer, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+  theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly prescription expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+
+cancer_cure <- (cancer_inpatient + cancer_outpatient)/(cancer_primarycare + cancer_prescription)
+
+pdf(".../Results/Cancer/Sex differences/cancer_cure.pdf", width = 15, height = 9)
+print(cancer_cure)
+dev.off()
+
+
+
+###### CARE RELATED EXP########
+#blue: non-bereaved
+
+cancer_homecare <- df_test |>
+                ggplot(aes(x = average_homecare, y = Predictions_Cancer, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+  theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly homecare expenditure") +
+                        ylab("Predicted risk of dying from cancer") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+cancer_residential <- df_test |>
+                ggplot(aes(x = average_residential, y = Predictions_Cancer, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+  theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly residential care expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 15)) 
+
+
+cancer_care <- cancer_homecare + cancer_residential
+
+pdf(".../Results/Cancer/Sex differences/cancer_care.pdf", width = 15, height = 5.5)
+print(cancer_care)
+dev.off()
+
+
+```
+
+#### CVD
+
+```{r}
+#writing recipe for the formula and making the dummy variables
+xg_CVD_recipe <- recipe(surv_CVD3 ~ bereaved01 + affluence.factor +                            sex + age_bereavement.factor + 
+                           children_n.factor + comorbidities_factor +
+                           immigration_status + average_inpatient +
+                           average_outpatient + average_prescription +
+                           average_primarycare + average_residential +
+                           average_homecare, data = df_train) |> 
+  step_dummy(all_nominal_predictors(),one_hot = T)
+
+#xg boost with computation engine: xgboost
+xgb_CVD_spec <- boost_tree(trees = tune(),
+                              mtry = tune(),
+                              min_n = tune(),
+                              tree_depth = tune(),
+                              stop_iter = tune(),
+                              learn_rate = tune()
+                              ) |> 
+                              set_engine("xgboost", validation = 0.2) |> 
+                              set_mode("classification")
+
+#workflow
+xgb_CVD_wf <- workflow(xg_CVD_recipe, xgb_CVD_spec)
+
+
+#tune hyperparameters (defines how our model is structured). Use the train df with crossvalidation.
+
+set.seed(29)
+
+doParallel::registerDoParallel()
+
+xgb_CVD_rs <- tune_race_anova(xgb_CVD_wf,
+                          df_train_cv,
+                          grid = 30,
+                          metrics = metric_set(brier_class),
+                          control = control_race(verbose_elim = TRUE))
+
+#plot results
+plot_race(xgb_CVD_rs)
+
+#Grid of hyperparameters
+show_best(xgb_CVD_rs)
+
+
+#finalize workflow
+xgb_CVD_last <- xgb_CVD_wf |> 
+    finalize_workflow(select_best(xgb_CVD_rs, 'brier_class')) |> 
+    last_fit(df_split)
+
+#metrics
+xgb_CVD_last |> collect_metrics()
+
+#predictions
+xgb_CVD_last |> collect_predictions()
+
+
+#group
+xgb_CVD_full_preds <- xgb_CVD_last$.predictions
+
+xgb_CVD_full_preds <- xgb_CVD_full_preds[[1]][2]
+
+xgb_CVD_full_preds <- as.matrix(xgb_CVD_full_preds)
+
+
+
+#Specify datadist
+dd <- datadist(df_train)
+
+options(datadist = "dd")
+
+# evaluate performance
+fit_cvd_total_score <- Score(list('LRM NULL' = fit0_cv,
+                              'LRM Simple' = fit_cv_simple,
+                              'LRM Full' = fit_cv_arv,
+                              'Xgboost Full' = xgb_CVD_full_preds), 
+                               formula = surv_CVD3 ~ 1,
+                               data = df_test,
+                               summary = 'ipa', plots = 'calibration',
+                               metrics = c('AUC', 'brier'), 
+                               se.fit = T)
+
+plotCalibration(fit_cvd_total_score, models = "Xgboost Full", rug = F, auc.in.legend = F, brier.in.legend = F, xlab = "Predicted risk of dying from CVD", ylab = "Observed frequency of the predicted risk", col = c("#56B4E9", "#CC79A7"))
+
+
+
+```
+
+##### Prediction plots
+
+```{r}
+#put the predictions from the xgb into the df. 
+df_test$Predictions_CVD <-  xgb_CVD_full_preds
+
+#personal colour scheme
+m_color <- c("#56B4E9", "#CC79A7", "#0072B2", "#E69F00", "#009E73")
+
+
+#Differences in predicted risks for bereaved and non-bereaved.
+boxplot_CVD <- df_test |>
+          ggplot(aes(x = bereaved01, y = Predictions_CVD)) +
+          geom_boxplot(outlier.shape = NA, color = "navy", fill = "#56B4E9", alpha=0.6) + 
+          theme_minimal(base_size = 14) +
+          facet_wrap(vars(sex))+
+          scale_y_continuous(limits = c(0, 0.15)) + 
+          xlab("Bereavement status") +
+          ylab("Predicted risk of dying from CVD")
+
+
+pdf(".../Results/CVD/boxplot_cvd.pdf", width = 7, height = 7)
+print(boxplot_CVD)
+dev.off()
+
+
+#sex differenes and age
+sex_age_CVD <- df_test |>
+  ggplot(aes(x = age_bereavement, y = Predictions_CVD, fill=bereaved01, colour = bereaved01)) +
+  geom_smooth(show.legend = F) +
+  facet_wrap(vars(sex))+
+  theme_minimal(base_size = 14) +
+  scale_color_manual(values = m_color)+ 
+  scale_fill_manual(values = m_color)+  
+  xlab("Age at bereavement") +
+  ylab("Predicted risk of dying from CVD") +
+  scale_x_continuous(limits = c(65, 100)) 
+
+#save
+pdf(".../Results/CVD/Sex differences/sex_age_CVD.pdf", width = 7, height = 7)
+print(sex_age_CVD)
+dev.off()
+
+
+#Differences in predicted risks for bereaved and non-bereaved. 
+df_test |>
+  ggplot(aes(x = bereaved01, y = Predictions_CVD)) +
+  geom_boxplot(outlier.shape = NA) + 
+  theme_minimal(base_size = 14) +
+  facet_wrap(vars(sex))+
+  scale_y_continuous(limits = c(0, 0.15)) + 
+  xlab("Bereavement status") +
+  ylab("Predicted risk of dying from CVD")
+
+
+#distribution of risks
+CVD_risk_distribution <- df_test |> 
+              ggplot(aes(x = Predictions_CVD, fill = surv_CVD3)) + 
+              geom_density(alpha = 0.4, show.legend = F) +
+              xlab("Predicted risk of dying from CVD") +
+              theme_minimal(base_size = 14) +
+              scale_color_manual(values = m_color)+ 
+              scale_fill_manual(values = m_color)
+
+#save
+pdf(".../Results/CVD/Sex differences/CVD_risk_distribution.pdf", width = 7, height = 7)
+print(CVD_risk_distribution)
+dev.off()
+
+############ CURE RELATED EXP #################
+#blue: non-bereaved
+
+#expenditures, sex diffrences
+CVD_inpatient <- df_test |>
+                ggplot(aes(x = average_inpatient, y = Predictions_CVD, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend =F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital inpatient expenditure") +
+                        ylab("Predicted risk of dying from CVD") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+CVD_outpatient <- df_test |>
+                ggplot(aes(x = average_outpatient, y = Predictions_CVD, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital outpatient expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+CVD_primarycare <- df_test |>
+                ggplot(aes(x = average_primarycare, y = Predictions_CVD, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly primary care expenditure") +
+                        ylab("Predicted risk of dying from CVD") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+CVD_prescription <- df_test |>
+                ggplot(aes(x = average_prescription, y = Predictions_CVD, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly prescription expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+
+CVD_cure <- (CVD_inpatient + CVD_outpatient)/(CVD_primarycare + CVD_prescription)
+
+pdf(".../Results/CVD/Sex differences/CVD_cure.pdf", width = 15, height = 9)
+print(CVD_cure)
+dev.off()
+
+
+
+###### CARE RELATED EXP########
+#blue: non-bereaved
+
+CVD_homecare <- df_test |>
+                ggplot(aes(x = average_homecare, y = Predictions_CVD, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly homecare expenditure") +
+                        ylab("Predicted risk of dying from CVD") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+CVD_residential <- df_test |>
+                ggplot(aes(x = average_residential, y = Predictions_CVD, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly residential care expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 15)) 
+
+
+CVD_care <- CVD_homecare + CVD_residential
+
+pdf(".../Results/CVD/Sex differences/CVD_care.pdf", width = 15, height = 5.5)
+print(CVD_care)
+dev.off()
+
+```
+
+##### 
+
+#### Dementia and Parkinsons
+
+```{r}
+#writing recipe for the formula and making the dummy variables
+xg_neuro_recipe <- recipe(surv_neuro3 ~ bereaved01 + affluence.factor +                            sex + age_bereavement.factor + 
+                           children_n.factor + comorbidities_factor +
+                           immigration_status + average_inpatient +
+                           average_outpatient + average_prescription +
+                           average_primarycare + average_residential +
+                           average_homecare, data = df_train) |> 
+  step_dummy(all_nominal_predictors(),one_hot = T)
+
+#xg boost with computation engine: xgboost
+xgb_neuro_spec <- boost_tree(trees = tune(),
+                              mtry = tune(),
+                              min_n = tune(),
+                              tree_depth = tune(),
+                              stop_iter = tune(),
+                              learn_rate = tune()
+                              ) |> 
+                              set_engine("xgboost", validation = 0.2) |> 
+                              set_mode("classification")
+
+#workflow
+xgb_neuro_wf <- workflow(xg_neuro_recipe, xgb_neuro_spec)
+
+
+#tune hyperparameters (defines how our model is structured). Use the train df with crossvalidation.
+
+set.seed(29)
+
+doParallel::registerDoParallel()
+
+xgb_neuro_rs <- tune_race_anova(xgb_neuro_wf,
+                          df_train_cv,
+                          grid = 30,
+                          metrics = metric_set(brier_class),
+                          control = control_race(verbose_elim = TRUE))
+
+#plot results
+plot_race(xgb_neuro_rs)
+
+#Grid of hyperparameters
+show_best(xgb_neuro_rs)
+
+
+#finalize workflow
+xgb_neuro_last <- xgb_neuro_wf |> 
+    finalize_workflow(select_best(xgb_neuro_rs, 'brier_class')) |> 
+    last_fit(df_split)
+
+#metrics
+xgb_neuro_last |> collect_metrics()
+
+#predictions
+xgb_neuro_last |> collect_predictions()
+
+
+#group
+xgb_neuro_full_preds <- xgb_neuro_last$.predictions
+
+xgb_neuro_full_preds <- xgb_neuro_full_preds[[1]][2]
+
+xgb_neuro_full_preds <- as.matrix(xgb_neuro_full_preds)
+
+
+#Specify datadist
+dd <- datadist(df_train)
+
+options(datadist = "dd")
+
+# evaluate performance
+fit_neuro_total_score <- Score(list('LRM NULL' = fit0_neuro,
+                              'LRM Simple' = fit_neuro_simple,
+                              'LRM Full' = fit_neuro_arv,
+                              'Xgboost Full' = xgb_neuro_full_preds), 
+                               formula = surv_neuro3 ~ 1,
+                               data = df_test,
+                               summary = 'ipa', plots = 'calibration',
+                               metrics = c('AUC', 'brier'), 
+                               se.fit = T)
+
+plotCalibration(fit_neuro_total_score, models = "Xgboost Full", rug = F, auc.in.legend = F, brier.in.legend = F, xlab = "Predicted risk of dying from Dementia or Parkinson's disease", ylab = "Observed frequency of the predicted risk", col = c("#56B4E9", "#CC79A7"))
+```
+
+##### Prediction plots
+
+```{r}
+#put the predictions from the xgb into the df. 
+df_test$Predictions_neuro <-  xgb_neuro_full_preds
+
+
+#Differences in predicted risks for bereaved and non-bereaved.
+boxplot_neuro <- df_test |>
+          ggplot(aes(x = bereaved01, y = Predictions_neuro)) +
+          geom_boxplot(outlier.shape = NA, color = "navy", fill = "#56B4E9", alpha=0.6) + 
+          theme_minimal(base_size = 14) +
+          facet_wrap(vars(sex))+
+          scale_y_continuous(limits = c(0, 0.15)) + 
+          xlab("Bereavement status") +
+          ylab("Predicted risk of dying from dementia or Parkinson's")
+
+
+pdf(".../Results/Neuro/boxplot_neuro.pdf", width = 7, height = 7)
+print(boxplot_neuro)
+dev.off()
+
+
+
+#distribution of risks
+neuro_risk_distribution <- df_test |> 
+              ggplot(aes(x = Predictions_neuro, fill = surv_neuro3)) + 
+              geom_density(alpha = 0.4, show.legend = F) +
+              xlab("Predicted risk of dying from Dementia or Parkinson's") +
+              theme_minimal(base_size = 14) +
+              scale_color_manual(values = m_color)+ 
+              scale_fill_manual(values = m_color)
+
+#save
+pdf(".../Results/Neuro/Sex differences/neuro_risk_distribution.pdf", width = 7, height = 7)
+print(neuro_risk_distribution)
+dev.off()
+
+############ CURE RELATED EXP #################
+#blue: non-bereaved
+
+#expenditures, sex diffrences
+neuro_inpatient <- df_test |>
+                ggplot(aes(x = average_inpatient, y = Predictions_neuro, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend =F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital inpatient expenditure") +
+                        ylab("Predicted risk of dying from Dementia or Parkinson's") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+neuro_outpatient <- df_test |>
+                ggplot(aes(x = average_outpatient, y = Predictions_neuro, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital outpatient expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+neuro_primarycare <- df_test |>
+                ggplot(aes(x = average_primarycare, y = Predictions_neuro, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly primary care expenditure") +
+                        ylab("Predicted risk of dying from Dementia or Parkinson's") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+neuro_prescription <- df_test |>
+                ggplot(aes(x = average_prescription, y = Predictions_neuro, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly prescription expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+
+neuro_cure <- (neuro_inpatient + neuro_outpatient)/(neuro_primarycare + neuro_prescription)
+
+pdf(".../Results/Neuro/Sex differences/neuro_cure.pdf", width = 15, height = 9)
+print(neuro_cure)
+dev.off()
+
+
+
+###### CARE RELATED EXP########
+#blue: non-bereaved
+
+neuro_homecare <- df_test |>
+                ggplot(aes(x = average_homecare, y = Predictions_neuro, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly homecare expenditure") +
+                        ylab("Predicted risk of dying from Dementia or Parkinson's") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+neuro_residential <- df_test |>
+                ggplot(aes(x = average_residential, y = Predictions_neuro, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly residential care expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 15)) 
+
+
+neuro_care <- neuro_homecare + neuro_residential
+
+pdf(".../Results/Neuro/Sex differences/neuro_care.pdf", width = 15, height = 5.5)
+print(neuro_care)
+dev.off()
+```
+
+#### Diabetes
+
+```{r}
+#writing recipe for the formula and making the dummy variables
+xg_dm_recipe <- recipe(surv_dm3 ~ bereaved01 + affluence.factor +                            sex + age_bereavement.factor + 
+                           children_n.factor + comorbidities_factor +
+                           immigration_status + average_inpatient +
+                           average_outpatient + average_prescription +
+                           average_primarycare + average_residential +
+                           average_homecare, data = df_train) |> 
+  step_dummy(all_nominal_predictors(),one_hot = T)
+
+#xg boost with computation engine: xgboost
+xgb_dm_spec <- boost_tree(trees = tune(),
+                              mtry = tune(),
+                              min_n = tune(),
+                              tree_depth = tune(),
+                              stop_iter = tune(),
+                              learn_rate = tune()
+                              ) |> 
+                              set_engine("xgboost", validation = 0.2) |> 
+                              set_mode("classification")
+
+#workflow
+xgb_dm_wf <- workflow(xg_dm_recipe, xgb_dm_spec)
+
+
+#tune hyperparameters (defines how our model is structured). Use the train df with crossvalidation.
+
+set.seed(29)
+
+doParallel::registerDoParallel()
+
+xgb_dm_rs <- tune_race_anova(xgb_dm_wf,
+                          df_train_cv,
+                          grid = 30,
+                          metrics = metric_set(brier_class),
+                          control = control_race(verbose_elim = TRUE))
+
+#plot results
+plot_race(xgb_dm_rs)
+
+#Grid of hyperparameters
+show_best(xgb_dm_rs)
+
+
+#finalize workflow
+xgb_dm_last <- xgb_dm_wf |> 
+    finalize_workflow(select_best(xgb_dm_rs, 'brier_class')) |> 
+    last_fit(df_split)
+
+#metrics
+xgb_dm_last |> collect_metrics()
+
+#predictions
+xgb_dm_last |> collect_predictions()
+
+#group
+xgb_dm_full_preds <- xgb_dm_last$.predictions
+
+xgb_dm_full_preds <- xgb_dm_full_preds[[1]][2]
+
+xgb_dm_full_preds <- as.matrix(xgb_dm_full_preds)
+
+
+#Specify datadist
+dd <- datadist(df_train)
+
+options(datadist = "dd")
+
+# evaluate performance
+fit_dm_total_score <- Score(list('LRM NULL' = fit0_dm,
+                              'LRM Simple' = fit_dm_simple,
+                              'LRM Full' = fit_dm_arv,
+                              'Xgboost Full' = xgb_dm_full_preds), 
+                               formula = surv_dm3 ~ 1,
+                               data = df_test,
+                               summary = 'ipa', plots = 'calibration',
+                               metrics = c('AUC', 'brier'), 
+                               se.fit = T)
+
+plotCalibration(fit_dm_total_score, models = "Xgboost Full", rug = F, auc.in.legend = F, brier.in.legend = F, xlab = "Predicted risk of dying from diabetes", ylab = "Observed frequency of the predicted risk", col = c("#56B4E9", "#CC79A7"), round = F)
+
+plotCalibration(fit_dm_total_score, models = c("Xgboost Full", "LRM Full"), rug = F, auc.in.legend = F, brier.in.legend = F, xlab = "Predicted risk of dying from diabetes", ylab = "Observed frequency of the predicted risk", col = c("#56B4E9", "#CC79A7"), round = F)
+```
+
+##### Prediction plots
+
+```{r}
+#put the predictions from the xgb into the df. 
+df_test$Predictions_dm <-  xgb_dm_full_preds
+
+
+#Differences in predicted risks for bereaved and non-bereaved. 
+boxplot_dm <- df_test |>
+          ggplot(aes(x = bereaved01, y = Predictions_dm)) +
+          geom_boxplot(outlier.shape = NA, color = "navy", fill = "#56B4E9", alpha=0.6) + 
+          theme_minimal(base_size = 14) +
+          facet_wrap(vars(sex))+
+          scale_y_continuous(limits = c(0, 0.15)) + 
+          xlab("Bereavement status") +
+          ylab("Predicted risk of dying from diabetes")
+
+
+pdf(".../Results/Diabetes/boxplot_dm.pdf", width = 7, height = 7)
+print(boxplot_dm)
+dev.off()
+
+
+#distribution of risks
+dm_risk_distribution <- df_test |> 
+              ggplot(aes(x = Predictions_dm, fill = surv_dm3)) + 
+              geom_density(alpha = 0.4, show.legend = F) +
+              xlab("Predicted risk of dying from diabetes") +
+              theme_minimal(base_size = 14) +
+              scale_color_manual(values = m_color)+ 
+              scale_fill_manual(values = m_color)
+
+#save
+pdf(".../Results/Diabetes/Sex differences/dm_risk_distribution.pdf", width = 7, height = 7)
+print(dm_risk_distribution)
+dev.off()
+
+############ CURE RELATED EXP #################
+#blue: non-bereaved
+
+#expenditures, sex diffrences
+dm_inpatient <- df_test |>
+                ggplot(aes(x = average_inpatient, y = Predictions_dm, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend =F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital inpatient expenditure") +
+                        ylab("Predicted risk of dying from diabetes") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+dm_outpatient <- df_test |>
+                ggplot(aes(x = average_outpatient, y = Predictions_dm, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital outpatient expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+dm_primarycare <- df_test |>
+                ggplot(aes(x = average_primarycare, y = Predictions_dm, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly primary care expenditure") +
+                        ylab("Predicted risk of dying from diabetes") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+dm_prescription <- df_test |>
+                ggplot(aes(x = average_prescription, y = Predictions_dm, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly prescription expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+
+dm_cure <- (dm_inpatient + dm_outpatient)/(dm_primarycare + dm_prescription)
+
+pdf(".../Results/Diabetes/Sex differences/dm_cure.pdf", width = 15, height = 9)
+print(dm_cure)
+dev.off()
+
+
+
+###### CARE RELATED EXP########
+#blue: non-bereaved
+
+dm_homecare <- df_test |>
+                ggplot(aes(x = average_homecare, y = Predictions_dm, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly homecare expenditure") +
+                        ylab("Predicted risk of dying from diabetes") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+dm_residential <- df_test |>
+                ggplot(aes(x = average_residential, y = Predictions_dm, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly residential care expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 15)) 
+
+
+dm_care <- dm_homecare + dm_residential
+
+pdf(".../Results/Diabetes/Sex differences/dm_care.pdf", width = 15, height = 5.5)
+print(dm_care)
+dev.off()
+```
+
+#### Digestive
+
+```{r}
+#writing recipe for the formula and making the dummy variables
+xg_digestive_recipe <- recipe(surv_digestive3 ~ bereaved01 + affluence.factor +                            sex + age_bereavement.factor + 
+                           children_n.factor + comorbidities_factor +
+                           immigration_status + average_inpatient +
+                           average_outpatient + average_prescription +
+                           average_primarycare + average_residential +
+                           average_homecare, data = df_train) |> 
+  step_dummy(all_nominal_predictors(),one_hot = T)
+
+#xg boost with computation engine: xgboost
+xgb_digestive_spec <- boost_tree(trees = tune(),
+                              mtry = tune(),
+                              min_n = tune(),
+                              tree_depth = tune(),
+                              stop_iter = tune(),
+                              learn_rate = tune()
+                              ) |> 
+                              set_engine("xgboost", validation = 0.2) |> 
+                              set_mode("classification")
+
+#workflow
+xgb_digestive_wf <- workflow(xg_digestive_recipe, xgb_digestive_spec)
+
+
+#tune hyperparameters (defines how our model is structured). Use the train df with crossvalidation.
+
+set.seed(29)
+
+doParallel::registerDoParallel()
+
+xgb_digestive_rs <- tune_race_anova(xgb_digestive_wf,
+                          df_train_cv,
+                          grid = 30,
+                          metrics = metric_set(brier_class),
+                          control = control_race(verbose_elim = TRUE))
+
+#plot results
+plot_race(xgb_digestive_rs)
+
+#Grid of hyperparameters
+show_best(xgb_digestive_rs)
+
+
+#finalize workflow
+xgb_digestive_last <- xgb_digestive_wf |> 
+    finalize_workflow(select_best(xgb_digestive_rs, 'brier_class')) |> 
+    last_fit(df_split)
+
+#metrics
+xgb_digestive_last |> collect_metrics()
+
+#predictions
+xgb_digestive_last |> collect_predictions()
+
+
+#group
+xgb_digestive_full_preds <- xgb_digestive_last$.predictions
+
+xgb_digestive_full_preds <- xgb_digestive_full_preds[[1]][2]
+
+xgb_digestive_full_preds <- as.matrix(xgb_digestive_full_preds)
+
+
+#Specify datadist
+dd <- datadist(df_train)
+
+options(datadist = "dd")
+
+# evaluate performance
+fit_digestive_total_score <- Score(list('LRM NULL' = fit0_digestive,
+                              'LRM Simple' = fit_digestive_simple,
+                              'LRM Full' = fit_digestive_arv,
+                              'Xgboost Full' = xgb_digestive_full_preds), 
+                               formula = surv_digestive3 ~ 1,
+                               data = df_test,
+                               summary = 'ipa', plots = 'calibration',
+                               metrics = c('AUC', 'brier'), 
+                               se.fit = T)
+
+#digestive_calibration <- plotCalibration(fit_digestive_total_score, models = "Xgboost Full", rug = F, auc.in.legend = F, brier.in.legend = F, xlab = "Predicted risk of dying from digestive diseases", ylab = "Observed frequency of the predicted risk", col = c("#56B4E9", "#CC79A7"))
+
+
+```
+
+#### Psychiatric
+
+```{r}
+#writing recipe for the formula and making the dummy variables
+xg_psychiatric_recipe <- recipe(surv_psychiatric3 ~ bereaved01 + affluence.factor +                            sex + age_bereavement.factor + 
+                           children_n.factor + comorbidities_factor +
+                           immigration_status + average_inpatient +
+                           average_outpatient + average_prescription +
+                           average_primarycare + average_residential +
+                           average_homecare, data = df_train) |> 
+  step_dummy(all_nominal_predictors(),one_hot = T)
+
+#xg boost with computation engine: xgboost
+xgb_psychiatric_spec <- boost_tree(trees = tune(),
+                              mtry = tune(),
+                              min_n = tune(),
+                              tree_depth = tune(),
+                              stop_iter = tune(),
+                              learn_rate = tune()
+                              ) |> 
+                              set_engine("xgboost", validation = 0.2) |> 
+                              set_mode("classification")
+
+#workflow
+xgb_psychiatric_wf <- workflow(xg_psychiatric_recipe, xgb_psychiatric_spec)
+
+
+#tune hyperparameters (defines how our model is structured). Use the train df with crossvalidation.
+
+set.seed(29)
+
+doParallel::registerDoParallel()
+
+xgb_psychiatric_rs <- tune_race_anova(xgb_psychiatric_wf,
+                          df_train_cv,
+                          grid = 30,
+                          metrics = metric_set(brier_class),
+                          control = control_race(verbose_elim = TRUE))
+
+#plot results
+plot_race(xgb_psychiatric_rs)
+
+#Grid of hyperparameters
+show_best(xgb_psychiatric_rs)
+
+
+#finalize workflow
+xgb_psychiatric_last <- xgb_psychiatric_wf |> 
+    finalize_workflow(select_best(xgb_psychiatric_rs, 'brier_class')) |> 
+    last_fit(df_split)
+
+#metrics
+xgb_psychiatric_last |> collect_metrics()
+
+#predictions
+xgb_psychiatric_last |> collect_predictions()
+
+
+#group
+xgb_psychiatric_full_preds <- xgb_psychiatric_last$.predictions
+
+xgb_psychiatric_full_preds <- xgb_psychiatric_full_preds[[1]][2]
+
+xgb_psychiatric_full_preds <- as.matrix(xgb_psychiatric_full_preds)
+
+
+
+#Specify datadist
+dd <- datadist(df_train)
+
+options(datadist = "dd")
+
+# evaluate performance
+fit_psychiatric_total_score <- Score(list('LRM NULL' = fit0_psychiatric,
+                              'LRM Simple' = fit_psychiatric_simple,
+                              'LRM Full' = fit_psychiatric_arv,
+                              'Xgboost Full' = xgb_psychiatric_full_preds), 
+                               formula = surv_psychiatric3 ~ 1,
+                               data = df_test,
+                               summary = 'ipa', plots = 'calibration',
+                               metrics = c('AUC', 'brier'), 
+                               se.fit = T)
+
+psychiatric_calibration <- plotCalibration(fit_psychiatric_total_score, models = "Xgboost Full", rug = F, auc.in.legend = F, brier.in.legend = F, xlab = "Predicted risk of dying from psychiatric diseases and suicide", ylab = "Observed frequency of the predicted risk", col = c("#56B4E9", "#CC79A7"), round = F)
+
+```
+
+##### 
+
+#### Respiratory
+
+```{r}
+#writing recipe for the formula and making the dummy variables
+xg_respiratory_recipe <- recipe(surv_respiratory3 ~ bereaved01 + affluence.factor +                            sex + age_bereavement.factor + 
+                           children_n.factor + comorbidities_factor +
+                           immigration_status + average_inpatient +
+                           average_outpatient + average_prescription +
+                           average_primarycare + average_residential +
+                           average_homecare, data = df_train) |> 
+  step_dummy(all_nominal_predictors(),one_hot = T)
+
+#xg boost with computation engine: xgboost
+xgb_respiratory_spec <- boost_tree(trees = tune(),
+                              mtry = tune(),
+                              min_n = tune(),
+                              tree_depth = tune(),
+                              stop_iter = tune(),
+                              learn_rate = tune()
+                              ) |> 
+                              set_engine("xgboost", validation = 0.2) |> 
+                              set_mode("classification")
+
+#workflow
+xgb_respiratory_wf <- workflow(xg_respiratory_recipe, xgb_respiratory_spec)
+
+
+#tune hyperparameters (defines how our model is structured). Use the train df with crossvalidation.
+
+set.seed(29)
+
+doParallel::registerDoParallel()
+
+xgb_respiratory_rs <- tune_race_anova(xgb_respiratory_wf,
+                          df_train_cv,
+                          grid = 30,
+                          metrics = metric_set(brier_class),
+                          control = control_race(verbose_elim = TRUE))
+
+#plot results
+plot_race(xgb_respiratory_rs)
+
+#Grid of hyperparameters
+show_best(xgb_respiratory_rs)
+
+
+#finalize workflow
+xgb_respiratory_last <- xgb_respiratory_wf |> 
+    finalize_workflow(select_best(xgb_respiratory_rs, 'brier_class')) |> 
+    last_fit(df_split)
+
+#metrics
+xgb_respiratory_last |> collect_metrics()
+
+#predictions
+xgb_respiratory_last |> collect_predictions()
+
+
+#group
+xgb_respiratory_full_preds <- xgb_respiratory_last$.predictions
+
+xgb_respiratory_full_preds <- xgb_respiratory_full_preds[[1]][2]
+
+xgb_respiratory_full_preds <- as.matrix(xgb_respiratory_full_preds)
+
+
+#Specify datadist
+dd <- datadist(df_train)
+
+options(datadist = "dd")
+
+# evaluate performance
+fit_respiratory_total_score <- Score(list('LRM NULL' = fit0_resp,
+                              'LRM Simple' = fit_resp_simple,
+                              'LRM Full' = fit_resp_arv,
+                              'Xgboost Full' = xgb_respiratory_full_preds), 
+                               formula = surv_respiratory3 ~ 1,
+                               data = df_test,
+                               summary = 'ipa', plots = 'calibration',
+                               metrics = c('AUC', 'brier'), 
+                               se.fit = T)
+
+plotCalibration(fit_respiratory_total_score, models = "Xgboost Full", rug = F, auc.in.legend = F, brier.in.legend = F, xlab = "Predicted risk of dying from respiratory diseases", ylab = "Observed frequency of the predicted risk", col = c("#56B4E9", "#CC79A7"))
+
+```
+
+##### Prediction plots
+
+```{r}
+#put the predictions from the xgb into the df. 
+df_test$Predictions_resp <-  xgb_respiratory_full_preds
+
+
+
+#Differences in predicted risks for bereaved and non-bereaved. 
+boxplot_resp <- df_test |>
+          ggplot(aes(x = bereaved01, y = Predictions_resp)) +
+          geom_boxplot(outlier.shape = NA, color = "navy", fill = "#56B4E9", alpha=0.6) + 
+          theme_minimal(base_size = 14) +
+          facet_wrap(vars(sex))+
+          scale_y_continuous(limits = c(0, 0.15)) + 
+          xlab("Bereavement status") +
+          ylab("Predicted risk of dying from respiratory diseases")
+
+
+pdf(".../Results/Respiratory/boxplot_resp.pdf", width = 7, height = 7)
+print(boxplot_resp)
+dev.off()
+
+
+
+#distribution of risks
+resp_risk_distribution <- df_test |> 
+              ggplot(aes(x = Predictions_resp, fill = surv_respiratory3)) + 
+              geom_density(alpha = 0.4, show.legend = F) +
+              xlab("Predicted risk of dying from respiratory diseases") +
+              theme_minimal(base_size = 14) +
+              scale_color_manual(values = m_color)+ 
+              scale_fill_manual(values = m_color)
+
+#save
+pdf(".../Results/Respiratory/Sex differences/resp_risk_distribution.pdf", width = 7, height = 7)
+print(resp_risk_distribution)
+dev.off()
+
+############ CURE RELATED EXP #################
+#blue: non-bereaved
+
+#expenditures, sex diffrences
+resp_inpatient <- df_test |>
+                ggplot(aes(x = average_inpatient, y = Predictions_resp, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend =F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital inpatient expenditure") +
+                        ylab("Predicted risk of dying from respiratory diseases") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+resp_outpatient <- df_test |>
+                ggplot(aes(x = average_outpatient, y = Predictions_resp, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly hospital outpatient expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+resp_primarycare <- df_test |>
+                ggplot(aes(x = average_primarycare, y = Predictions_resp, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly primary care expenditure") +
+                        ylab("Predicted risk of dying from respiratory diseases") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+resp_prescription <- df_test |>
+                ggplot(aes(x = average_prescription, y = Predictions_resp, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly prescription expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+
+resp_cure <- (resp_inpatient + resp_outpatient)/(resp_primarycare + resp_prescription)
+
+pdf(".../Results/Respiratory/Sex differences/resp_cure.pdf", width = 15, height = 9)
+print(resp_cure)
+dev.off()
+
+
+
+###### CARE RELATED EXP########
+#blue: non-bereaved
+
+resp_homecare <- df_test |>
+                ggplot(aes(x = average_homecare, y = Predictions_resp, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly homecare expenditure") +
+                        ylab("Predicted risk of dying from respiratory diseases") +
+                        scale_x_continuous(limits = c(0, 1)) 
+
+resp_residential <- df_test |>
+                ggplot(aes(x = average_residential, y = Predictions_resp, 
+                           fill=bereaved01, colour = bereaved01)) +
+                        geom_smooth(show.legend = F) +
+                        facet_wrap(vars(sex))+
+                        theme_minimal(base_size = 14) +
+                        theme(strip.text=element_text(size=14))+
+                        scale_color_manual(values = m_color)+ 
+                        scale_fill_manual(values = m_color)+  
+                        xlab("Average weekly residential care expenditure") +
+                        ylab(label = NULL) +
+                        scale_x_continuous(limits = c(0, 15)) 
+
+
+resp_care <- resp_homecare + resp_residential
+
+pdf(".../Results/Respiratory/Sex differences/resp_care.pdf", width = 15, height = 5.5)
+print(resp_care)
+dev.off()
+```
+
+## Evaluating the AUC and brier score
+
+Evaluating the model performance with the AUC, brier score and IPA.
+
+### AUC
+
+```{r}
+df_AUC_cancer <- fit_cancer_total_score$AUC$score |> 
+  as.data.frame() |> 
+  mutate(AUC = round(AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |> 
+  mutate(Cause = "Cancer")
+
+
+df_AUC_cv <- fit_cvd_total_score$AUC$score |> 
+  as.data.frame() |> 
+  mutate(AUC = round(AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |> 
+  mutate(Cause = "CV")
+
+df_AUC_neuro <- fit_neuro_total_score$AUC$score |> 
+  as.data.frame() |> 
+  mutate(AUC = round(AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |> 
+  mutate(Cause = "Neuro")
+
+df_AUC_dm <- fit_dm_total_score$AUC$score |> 
+  as.data.frame() |> 
+  mutate(AUC = round(AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |> 
+  mutate(Cause = "Diabetes")
+
+df_AUC_digestive <- fit_digestive_total_score$AUC$score |> 
+  as.data.frame() |> 
+  mutate(AUC = round(AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |> 
+  mutate(Cause = "Diagestive")
+
+df_AUC_psychiatric <- fit_psychiatric_total_score$AUC$score |> 
+  as.data.frame() |> 
+  mutate(AUC = round(AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |> 
+  mutate(Cause = "Psychiatric")
+
+df_AUC_resp <- fit_respiratory_total_score$AUC$score |> 
+  as.data.frame() |> 
+  mutate(AUC = round(AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |> 
+  mutate(Cause = "Respiratory")
+
+
+df_AUC_together <- df_AUC_cancer |> 
+  full_join(df_AUC_cv) |> 
+  full_join(df_AUC_neuro) |> 
+  full_join(df_AUC_dm) |> 
+  full_join(df_AUC_digestive) |> 
+  full_join(df_AUC_psychiatric) |> 
+  full_join(df_AUC_resp) |> 
+  select(Cause, model, AUC, lower, upper)
+
+
+write.xlsx(df_AUC_together, ".../Results/AUC.xlsx")
+```
+
+### Delta AUC
+
+```{r}
+
+df_AUC_cancer <- fit_cancer_total_score$AUC$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.AUC = round(delta.AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |> 
+  mutate(Cause = "Cancer")
+
+df_AUC_cv <- fit_cvd_total_score$AUC$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.AUC = round(delta.AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "CV")
+
+df_AUC_neuro <- fit_neuro_total_score$AUC$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.AUC = round(delta.AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Neuro")
+
+df_AUC_dm <- fit_dm_total_score$AUC$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.AUC = round(delta.AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Diabetes")
+
+df_AUC_digestive <- fit_digestive_total_score$AUC$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.AUC = round(delta.AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Diagestive")
+
+
+df_AUC_psychiatric <- fit_psychiatric_total_score$AUC$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.AUC = round(delta.AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Psychiatric")
+
+df_AUC_resp <- fit_respiratory_total_score$AUC$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.AUC = round(delta.AUC * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Respiratory")
+
+
+df_delta_AUC_together <- df_AUC_cancer |> 
+  full_join(df_AUC_cv) |> 
+  full_join(df_AUC_neuro) |> 
+  full_join(df_AUC_dm) |> 
+  full_join(df_AUC_digestive) |> 
+  full_join(df_AUC_psychiatric) |> 
+  full_join(df_AUC_resp) |> 
+  select(Cause, model, reference, delta.AUC, lower, upper)
+
+
+write.xlsx(df_delta_AUC_together, ".../Results/delta_AUC.xlsx")
+```
+
+### Brier
+
+```{r}
+df_brier_cancer <- fit_cancer_total_score$Brier$score |> 
+  as.data.frame() |> 
+  mutate(Brier = round(Brier * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Cancer")
+
+df_brier_cv <- fit_cvd_total_score$Brier$score |> 
+  as.data.frame() |> 
+  mutate(Brier = round(Brier * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "CV")
+
+df_brier_neuro <- fit_neuro_total_score$Brier$score |> 
+  as.data.frame() |> 
+  mutate(Brier = round(Brier * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Neuro")
+
+df_brier_dm <- fit_dm_total_score$Brier$score |> 
+  as.data.frame() |> 
+  mutate(Brier = round(Brier * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Diabetes")
+
+df_brier_digestive <- fit_digestive_total_score$Brier$score |> 
+  as.data.frame() |> 
+  mutate(Brier = round(Brier * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Digestive")
+
+
+df_brier_psychiatric <- fit_psychiatric_total_score$Brier$score |> 
+  as.data.frame() |> 
+  mutate(Brier = round(Brier * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Psychiatric")
+
+df_brier_resp <- fit_respiratory_total_score$Brier$score |> 
+  as.data.frame() |> 
+  mutate(Brier = round(Brier * 100,2), 
+         upper = round(upper * 100,2), 
+         lower = round(lower*100,2)) |>
+  mutate(Cause = "Respiratory")
+
+
+
+df_brier_together2 <- df_brier_cancer |> 
+  full_join(df_brier_cv) |> 
+  full_join(df_brier_neuro) |> 
+  full_join(df_brier_dm) |> 
+  full_join(df_brier_digestive) |> 
+  full_join(df_brier_psychiatric) |> 
+  full_join(df_brier_resp) |> 
+  select(Cause, model, Brier, lower, upper, IPA)
+
+
+write.xlsx(df_brier_together2, ".../Results/brier_ipa.xlsx")
+```
+
+### Delta brier
+
+```{r}
+df_brier_cancer <- fit_cancer_total_score$Brier$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.Brier = round(delta.Brier * 100,5), 
+         upper = round(upper * 100,5), 
+         lower = round(lower*100,5)) |>
+  mutate(Cause = "Cancer")
+
+df_brier_cv <- fit_cvd_total_score$Brier$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.Brier = round(delta.Brier * 100,5), 
+         upper = round(upper * 100,5), 
+         lower = round(lower*100,5)) |>
+  mutate(Cause = "CV")
+
+df_brier_neuro <- fit_neuro_total_score$Brier$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.Brier = round(delta.Brier * 100,5), 
+         upper = round(upper * 100,5), 
+         lower = round(lower*100,5)) |>
+  mutate(Cause = "Neuro")
+
+df_brier_dm <- fit_dm_total_score$Brier$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.Brier = round(delta.Brier * 100,5), 
+         upper = round(upper * 100,5), 
+         lower = round(lower*100,5)) |>
+  mutate(Cause = "Diabetes")
+
+df_brier_digestive <- fit_digestive_total_score$Brier$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.Brier = round(delta.Brier * 100,5), 
+         upper = round(upper * 100,5), 
+         lower = round(lower*100,5)) |>
+  mutate(Cause = "Digestive")
+
+
+df_brier_psychiatric <- fit_psychiatric_total_score$Brier$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.Brier = round(delta.Brier * 100,5), 
+         upper = round(upper * 100,5), 
+         lower = round(lower*100,5)) |>
+  mutate(Cause = "Psychiatric")
+
+df_brier_resp <- fit_respiratory_total_score$Brier$contrasts |> 
+  as.data.frame() |> 
+  mutate(delta.Brier = round(delta.Brier * 100,5), 
+         upper = round(upper * 100,5), 
+         lower = round(lower*100,5)) |>
+  mutate(Cause = "Respiratory")
+
+
+df_brier_together <- df_brier_cancer |> 
+  full_join(df_brier_cv) |> 
+  full_join(df_brier_neuro) |> 
+  full_join(df_brier_dm) |> 
+  full_join(df_brier_digestive) |> 
+  full_join(df_brier_psychiatric) |> 
+  full_join(df_brier_resp) |> 
+  select(Cause, model, reference, delta.Brier, lower, upper)
+
+
+write.xlsx(df_brier_together, ".../Results/delta_brier.xlsx")
+
+```

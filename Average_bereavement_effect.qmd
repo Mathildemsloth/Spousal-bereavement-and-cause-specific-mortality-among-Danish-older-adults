@@ -1,0 +1,480 @@
+---
+title: "Average bereavement effect"
+author: "Mathilde Marie Brünnich Sloth"
+format: html
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+# Average bereavement effect
+
+The provided code is for the analysis of the average effect of bereavement on different causes of death within 3 years of index date.
+
+```{r}
+library(riskRegression)
+library(dplyr)
+library(survival)
+library(Publish)
+library(rms)
+library(rsample)
+library(lubridate)
+library(xlsx)
+```
+
+#### Load df
+
+Loading data frame. Code for preprocessing is also made available.
+
+```{r}
+df <- read.csv(".../Data/dataframe1.csv")
+```
+
+Formating
+
+```{r}
+df$children_n.factor <- as.factor(df$children_n.factor)
+df$comorbidities_factor <- as.factor(df$comorbidities_factor)
+df$immigration_status <- as.factor(df$immigration_status)
+df$bereaved01 <- as.factor(df$bereaved01)
+df$sex <- as.factor(df$sex)
+
+
+df$surv_cancer <- as.factor(df$surv_cancer)
+df$surv_cardiovascular <- as.factor(df$surv_cardiovascular)
+df$surv_neuro <- as.factor(df$surv_neuro)
+df$surv_dm <- as.factor(df$surv_dm)
+df$surv_digestive <- as.factor(df$surv_digestive)
+df$surv_psychiatric <- as.factor(df$surv_psychiatric)
+df$surv_resp <- as.factor(df$surv_resp)
+```
+
+Check for missings in data.
+
+```{r}
+sum(is.na(df$children_n.factor))
+sum(is.na(df$comorbidities_factor))
+sum(is.na(df$immigration_status))
+sum(is.na(df$average_homecare))
+sum(is.na(df$average_primarycare))
+sum(is.na(df$average_residential))
+sum(is.na(df$average_outpatient))
+sum(is.na(df$average_inpatient))
+sum(is.na(df$sex))
+sum(is.na(df$bereaved01))
+```
+
+## Average bereavement effect analysis
+
+First part of the analysis males and females are analysed together.
+
+#### Distribution of covariates
+
+```{r}
+summary(utable(bereaved01 ~ sex + age_bereavement.factor + immigration_status + comorbidities_factor + affluence.factor + children_n.factor +average_full, 
+               data = df), show.totals = T)
+```
+
+#### 
+
+#### ABE, Cancer
+
+-   *ate* function is the average treatment effect. The first term is the formula from the CSC model.
+
+```{r}
+csc_bereavement_cancer <- CSC(Hist(surv_time, surv_cancer) ~ bereaved01 +  age_bereavement.factor + children_n.factor + average_full, data = df, cause = "1")
+
+arv_bereavement_cancer <- ate(csc_bereavement_cancer, treatment = "bereaved01", data = df, cause = "1", times = c(365*3) )
+
+ABE_cancer <- summary(arv_bereavement_cancer,short = T,type = "ratio")
+
+```
+
+#### ABE, cardio and vascular disease
+
+```{r}
+csc_bereavement_cardiovascular <- CSC(Hist(surv_time, surv_cardiovascular) ~ bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df, cause = "1")
+
+arv_bereavement_cardiovascular <- ate(csc_bereavement_cardiovascular, treatment = "bereaved01", data = df, cause = "1", times = c(365*3) )
+
+ABE_cv <-summary(arv_bereavement_cardiovascular,short = T,type = "ratio")
+```
+
+#### ABE, Dementia and Parkinsons
+
+```{r}
+csc_bereavement_neuro <- CSC(Hist(surv_time, surv_neuro) ~ bereaved01 +age_bereavement.factor + children_n.factor + average_full, data = df, cause = "1")
+
+arv_bereavement_neuro <- ate(csc_bereavement_neuro, treatment = "bereaved01", data = df, cause = "1", times = c(365*3) )
+
+ABE_neuro <-summary(arv_bereavement_neuro,short = T,type = "ratio")
+```
+
+#### ABE, Diabetes
+
+```{r}
+csc_bereavement_dm <- CSC(Hist(surv_time, surv_dm) ~ bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df, cause = "1")
+
+arv_bereavement_dm <- ate(csc_bereavement_dm, treatment = "bereaved01", data = df, cause = "1", times = c(365*3) )
+
+ABE_dm <- summary(arv_bereavement_dm,short = T,type = "ratio")
+```
+
+#### ABE, Diseases related to the digestive system
+
+```{r}
+csc_bereavement_digestive <- CSC(Hist(surv_time, surv_digestive) ~ bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df, cause = "1")
+
+arv_bereavement_digestive <- ate(csc_bereavement_digestive, treatment = "bereaved01", data = df, cause = "1", times = c(365*3) )
+
+ABE_digestive <- summary(arv_bereavement_digestive,short = T,type = "ratio")
+```
+
+#### ABE, Psychiatric diseases and suicide
+
+```{r}
+csc_bereavement_psychiatric <- CSC(Hist(surv_time, surv_psychiatric) ~ bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df, cause = "1")
+
+arv_bereavement_psychiatric <- ate(csc_bereavement_psychiatric, treatment = "bereaved01", data = df, cause = "1", times = c(365, 365*2, 365*3) )
+
+ABE_psychiatric <- summary(arv_bereavement_psychiatric,short = T,type = "ratio")
+```
+
+#### ABE, Respiratory diseases
+
+```{r}
+csc_bereavement_resp <- CSC(Hist(surv_time, surv_resp) ~ bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df, cause = "1")
+
+arv_bereavement_resp <- ate(csc_bereavement_resp, treatment = "bereaved01", data = df, cause = "1", times = c( 365*3) )
+
+ABE_resp <- summary(arv_bereavement_resp,short = T,type = "ratio")
+
+```
+
+#### ABE, together
+
+```{r}
+df_ABE_cancer <- ABE_cancer$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Cancer")
+
+df_ABE_cv <- ABE_cv$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "CV")
+  
+df_ABE_neuro <- ABE_neuro$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Neuro")
+
+df_ABE_dm <- ABE_dm$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Diabetes")
+
+df_ABE_digestive <- ABE_digestive$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Digestive")
+
+  
+df_ABE_psychiatric <- ABE_psychiatric$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Psychiatric")
+
+df_ABE_resp <- ABE_resp$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Resp")
+
+
+df_ABE_together <- df_ABE_cancer |> 
+  full_join(df_ABE_cv) |> 
+  full_join(df_ABE_neuro) |> 
+  full_join(df_ABE_dm) |> 
+  full_join(df_ABE_digestive) |> 
+  full_join(df_ABE_psychiatric) |> 
+  full_join(df_ABE_resp) |> 
+  select(ABE, time, A, estimate.A, B, estimate.B, estimate, lower, upper, p.value)
+
+
+
+write.xlsx(df_ABE_together, ".../Results/ABE.xlsx")
+
+
+```
+
+## ABE, Sex differences
+
+The average bereavement effect is analysed separately for males and females.
+
+### Split data by sex
+
+```{r}
+
+df_males <- df |> filter(sex == "1")
+
+df_females <- df |> filter(sex == "2")
+
+table_males <- summary(utable(bereaved01 ~ age_bereavement.factor + immigration_status + comorbidities_factor + affluence.factor + children_n.factor +average_primarycare + average_inpatient + average_outpatient + average_residential + average_homecare + average_prescription, 
+               data = df_males), show.totals = T)
+
+
+table_females <- summary(utable(bereaved01 ~ age_bereavement.factor + immigration_status + comorbidities_factor + affluence.factor + children_n.factor +average_primarycare + average_inpatient + average_outpatient + average_residential + average_homecare + average_prescription, 
+               data = df_females), show.totals = T)
+
+```
+
+#### ABE, Cancer
+
+-   *ate* function is the average treatment effect. The first term is the formula from the CSC model.
+
+```{r}
+
+# Males
+
+df_males$bereaved01 <- as.factor(df_males$bereaved01)
+
+csc_bereavement_cancer_males <- CSC(Hist(surv_time, surv_cancer) ~ bereaved01 + average_full, data = df_males, cause = "1")
+
+arv_bereavement_cancer_males <- ate(csc_bereavement_cancer_males, treatment = "bereaved01", data = df_males, cause = "1", times = c(365*3))
+
+ABE_cancer_males <- summary(arv_bereavement_cancer_males,short = T,type = "ratio")
+
+
+# Females
+
+
+df_females$bereaved01 <- as.factor(df_females$bereaved01)
+
+csc_bereavement_cancer_females <- CSC(Hist(surv_time, surv_cancer) ~ bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df_females, cause = "1")
+
+arv_bereavement_cancer_females <- ate(csc_bereavement_cancer_females, treatment = "bereaved01", data = df_females, cause = "1", times = c(365*3))
+
+ABE_cancer_females <- summary(arv_bereavement_cancer_females,short = T,type = "ratio")
+```
+
+#### ABE, cardio and vascular disease
+
+```{r}
+
+# Males
+
+csc_bereavement_cardiovascular_males <- CSC(Hist(surv_time, surv_cardiovascular) ~ bereaved01 + average_full, data = df_males, cause = "1")
+
+arv_bereavement_cardiovascular_males <- ate(csc_bereavement_cardiovascular_males, treatment = "bereaved01", data = df_males, cause = "1", times = c(365*3))
+
+ABE_cv_males <- summary(arv_bereavement_cardiovascular_males,short = T,type = "ratio")
+
+
+# Females
+
+csc_bereavement_cardiovascular_females <- CSC(Hist(surv_time, surv_cardiovascular) ~  bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df_females, cause = "1")
+
+arv_bereavement_cardiovascular_females <- ate(csc_bereavement_cardiovascular_females, treatment = "bereaved01", data = df_females, cause = "1", times = c(365*3))
+
+ABE_cardiovascular_females <- summary(arv_bereavement_cardiovascular_females,short = T,type = "ratio")
+```
+
+#### ABE, Dementia and Parkinsons
+
+```{r}
+
+# Males
+
+csc_bereavement_neuro_males <- CSC(Hist(surv_time, surv_neuro) ~ bereaved01 + average_full, data = df_males, cause = "1")
+
+arv_bereavement_neuro_males <- ate(csc_bereavement_neuro_males, treatment = "bereaved01", data = df_males, cause = "1", times = c(365*3))
+
+ABE_neuro_males <-summary(arv_bereavement_neuro_males,short = T,type = "ratio")
+
+
+# Females
+
+csc_bereavement_neuro_females <- CSC(Hist(surv_time, surv_neuro) ~  bereaved01 + age_bereavement.factor + children_n.factor + average_full , data = df_females, cause = "1")
+
+arv_bereavement_neuro_females <- ate(csc_bereavement_neuro_females, treatment = "bereaved01", data = df_females, cause = "1", times = c(365*3))
+
+ABE_neuro_females <- summary(arv_bereavement_neuro_females,short = T,type = "ratio")
+```
+
+#### ABE, Diabetes
+
+```{r}
+
+# Males
+
+csc_bereavement_dm_males <- CSC(Hist(surv_time, surv_dm) ~ bereaved01 + average_full, data = df_males, cause = "1")
+
+arv_bereavement_dm_males <- ate(csc_bereavement_dm_males, treatment = "bereaved01", data = df_males, cause = "1", times = c(365*3))
+
+ABE_dm_males <- summary(arv_bereavement_dm_males,short = T,type = "ratio")
+
+
+# Females
+
+csc_bereavement_dm_females <- CSC(Hist(surv_time, surv_dm) ~  bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df_females, cause = "1")
+
+arv_bereavement_dm_females <- ate(csc_bereavement_dm_females, treatment = "bereaved01", data = df_females, cause = "1", times = c(365*3))
+
+ABE_dm_females <- summary(arv_bereavement_dm_females,short = T,type = "ratio")
+```
+
+#### ABE, Diseases related to the digestive system
+
+```{r}
+
+# Males
+
+csc_bereavement_digestive_males <- CSC(Hist(surv_time, surv_digestive) ~ bereaved01 + average_full, data = df_males, cause = "1")
+
+arv_bereavement_digestive_males <- ate(csc_bereavement_digestive_males, treatment = "bereaved01", data = df_males, cause = "1", times = c(365*3))
+
+ABE_digestive_males <- summary(arv_bereavement_digestive_males,short = T,type = "ratio")
+
+
+# Females
+
+csc_bereavement_digestive_females <- CSC(Hist(surv_time, surv_digestive) ~  bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df_females, cause = "1")
+
+arv_bereavement_digestive_females <- ate(csc_bereavement_digestive_females, treatment = "bereaved01", data = df_females, cause = "1", times = c(365*3))
+
+ABE_digestive_females <- summary(arv_bereavement_digestive_females,short = T,type = "ratio")
+```
+
+#### ABE, Psychiatric diseases and suicide
+
+```{r}
+
+# Males
+
+csc_bereavement_psychiatric_males <- CSC(Hist(surv_time, surv_psychiatric) ~ bereaved01 + average_full, data = df_males, cause = "1")
+
+arv_bereavement_psychiatric_males <- ate(csc_bereavement_psychiatric_males, treatment = "bereaved01", data = df_males, cause = "1", times = 365*3)
+
+ABE_psychiatric_males <- summary(arv_bereavement_psychiatric_males,short = T,type = "ratio")
+
+# Females
+
+csc_bereavement_psychiatric_females <- CSC(Hist(surv_time, surv_psychiatric) ~  bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df_females, cause = "1")
+
+arv_bereavement_psychiatric_females <- ate(csc_bereavement_psychiatric_females, treatment = "bereaved01", data = df_females, cause = "1", times = 365*3)
+
+ABE_psychiatric_females <- summary(arv_bereavement_psychiatric_females,short = T,type = "diffRisk")
+```
+
+#### ABE, Respiratory diseases
+
+```{r}
+
+# Males
+
+csc_bereavement_resp_males <- CSC(Hist(surv_time, surv_resp) ~  bereaved01 + average_full, data = df_males, cause = "1")
+
+arv_bereavement_resp_males <- ate(csc_bereavement_resp_males, treatment = "bereaved01", data = df_males, cause = "1", times = c( 365*3))
+
+ABE_resp_males <- summary(arv_bereavement_resp_males,short = T,type = "ratio")
+
+
+# Females
+
+csc_bereavement_resp_females <- CSC(Hist(surv_time, surv_resp) ~  bereaved01 + age_bereavement.factor + children_n.factor + average_full, data = df_females, cause = "1")
+
+arv_bereavement_resp_females <- ate(csc_bereavement_resp_females, treatment = "bereaved01", data = df_females, cause = "1", times = c( 365*3))
+
+ABE_resp_females <- summary(arv_bereavement_resp_females,short = T,type = "ratio")
+```
+
+#### ABE, together
+
+```{r}
+
+#Males
+
+df_ABE_cancer_males <- ABE_cancer_males$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Cancer")
+
+df_ABE_cv_males <- ABE_cv_males$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "CV")
+  
+df_ABE_neuro_males <- ABE_neuro_males$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Neuro")
+
+df_ABE_dm_males <- ABE_dm_males$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Diabetes")
+
+df_ABE_digestive_males <- ABE_digestive_males$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Digestive")
+
+  
+df_ABE_psychiatric_males <- ABE_psychiatric_males$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Psychiatric")
+
+df_ABE_resp_males <- ABE_resp_males$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Resp")
+
+
+df_ABE_together_males <- df_ABE_cancer_males |> 
+  full_join(df_ABE_cv_males) |> 
+  full_join(df_ABE_neuro_males) |> 
+  full_join(df_ABE_dm_males) |> 
+  full_join(df_ABE_digestive_males) |> 
+  full_join(df_ABE_psychiatric_males) |> 
+  full_join(df_ABE_resp_males) |> 
+  select(ABE, A, estimate.A, B, estimate.B, estimate, lower, upper, p.value)
+
+
+
+write.xlsx(df_ABE_together_males, ".../ABE_male.xlsx")
+
+
+# Females
+
+df_ABE_cancer_females <- ABE_cancer_females$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Cancer")
+
+df_ABE_cv_females <- ABE_cardiovascular_females$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "CV")
+  
+df_ABE_neuro_females <- ABE_neuro_females$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Neuro")
+
+df_ABE_dm_females <- ABE_dm_females$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Diabetes")
+
+df_ABE_digestive_females <- ABE_digestive_females$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Digestive")
+
+df_ABE_psychiatric_females <- ABE_psychiatric_females$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Psychiatric")
+
+df_ABE_resp_females <- ABE_resp_females$ratioRisk |> 
+  as.data.frame() |> 
+  mutate(ABE = "Resp")
+
+
+df_ABE_together_females <- df_ABE_cancer_females |> 
+  full_join(df_ABE_cv_females) |> 
+  full_join(df_ABE_neuro_females) |> 
+  full_join(df_ABE_dm_females) |> 
+  full_join(df_ABE_digestive_females) |> 
+  full_join(df_ABE_psychiatric_females) |> 
+  full_join(df_ABE_resp_females) |> 
+  select(ABE, time, A, estimate.A, B, estimate.B, estimate, lower, upper, p.value)
+
+
+write.xlsx(df_ABE_together_females, ".../ABE_female.xlsx")
+
+
+```
